@@ -121,14 +121,59 @@ struct StreamingWebPreview: UIViewRepresentable {
                 coord.pendingIsStreaming = isStreaming
                 return
             }
-            let escaped = escape(content)
             if isStreaming {
-                webView.evaluateJavaScript("reconcileContent(`\(escaped)`)", completionHandler: nil)
+                // Throttle reconcileContent to at most once per 100ms.
+                // Without this, every streamed character fires a JS bridge call
+                // serializing 300+ lines of HTML into WKWebView at 60fps — the
+                // dominant lag source when streaming portfolio/HTML code blocks.
+                let now = CFAbsoluteTimeGetCurrent()
+                let elapsed = now - coord.lastReconcileTime
+                if elapsed >= Coordinator.reconcileThrottleInterval {
+                    // Enough time has passed — fire immediately.
+                    // Fix C: escape off main thread to avoid blocking the UI thread
+                    // with 4× replacingOccurrences on potentially 10k+ char strings.
+                    coord.lastReconcileTime = now
+                    coord.pendingReconcileWorkItem?.cancel()
+                    coord.pendingReconcileWorkItem = nil
+                    let capturedContent = content
+                    Task.detached(priority: .userInitiated) { [weak webView] in
+                        let escaped = Coordinator.escape(capturedContent)
+                        await MainActor.run {
+                            webView?.evaluateJavaScript("reconcileContent(`\(escaped)`)", completionHandler: nil)
+                        }
+                    }
+                } else {
+                    // Too soon — buffer the latest content and schedule a flush
+                    // at the throttle boundary. Any previous pending flush is
+                    // cancelled so only one is ever queued at a time.
+                    coord.pendingReconcileWorkItem?.cancel()
+                    let capturedContent = content
+                    let delay = Coordinator.reconcileThrottleInterval - elapsed
+                    let workItem = DispatchWorkItem { [weak coord, weak webView] in
+                        guard let coord, let webView else { return }
+                        coord.lastReconcileTime = CFAbsoluteTimeGetCurrent()
+                        coord.pendingReconcileWorkItem = nil
+                        // Fix C: escape on this background queue item (not main thread).
+                        let escaped = Coordinator.escape(capturedContent)
+                        DispatchQueue.main.async {
+                            webView.evaluateJavaScript("reconcileContent(`\(escaped)`)", completionHandler: nil)
+                        }
+                    }
+                    coord.pendingReconcileWorkItem = workItem
+                    DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + delay, execute: workItem)
+                }
             } else {
+                // Streaming ended — cancel any pending throttled update and
+                // finalize immediately with the complete content.
+                coord.pendingReconcileWorkItem?.cancel()
+                coord.pendingReconcileWorkItem = nil
                 coord.finalized = true
+                let escaped = escape(content)
                 webView.evaluateJavaScript("finalizeContent(`\(escaped)`)", completionHandler: nil)
             }
         } else if !isStreaming, coord.shellLoaded, !coord.finalized || streamingJustEnded {
+            coord.pendingReconcileWorkItem?.cancel()
+            coord.pendingReconcileWorkItem = nil
             coord.finalized = true
             let escaped = escape(content)
             webView.evaluateJavaScript("finalizeContent(`\(escaped)`)", completionHandler: nil)
@@ -149,6 +194,17 @@ struct StreamingWebPreview: UIViewRepresentable {
         var pendingIsStreaming: Bool = false
         var shellLoaded: Bool = false
         var finalized: Bool = false
+
+        /// Minimum interval (seconds) between reconcileContent JS calls during streaming.
+        /// 100ms = at most 10 WKWebView re-renders/sec instead of 60fps.
+        static let reconcileThrottleInterval: CFAbsoluteTime = 0.1
+
+        /// Timestamp of the last reconcileContent call (CFAbsoluteTime).
+        var lastReconcileTime: CFAbsoluteTime = 0
+
+        /// Pending throttled reconcile work item. Cancelled and replaced on every
+        /// new update tick so only one deferred flush is ever queued at a time.
+        var pendingReconcileWorkItem: DispatchWorkItem? = nil
 
         init(height: Binding<CGFloat>) {
             _height = height
@@ -176,8 +232,18 @@ struct StreamingWebPreview: UIViewRepresentable {
             else if let v = message.body as? Int, v > 0 { h = CGFloat(v) }
             else if let v = message.body as? Double, v > 0 { h = CGFloat(v) }
             else { return }
+            // Animate height only when content is finalized — during streaming,
+            // overlapping 200ms animations at 10fps created continuous main-thread
+            // animation frames competing with the WebContent render process.
+            // On finalize, a single easeOut animates the settle from streaming height
+            // to the final rendered height (script execution may expand the content).
+            let isFinalized = self.finalized
             DispatchQueue.main.async {
-                withAnimation(.easeOut(duration: 0.2)) {
+                if isFinalized {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        self.height = min(h, 3000)
+                    }
+                } else {
                     self.height = min(h, 3000)
                 }
             }
@@ -207,14 +273,16 @@ struct StreamingWebPreview: UIViewRepresentable {
             decidePolicyFor navigationAction: WKNavigationAction,
             decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
         ) {
-            if navigationAction.navigationType == .other {
-                decisionHandler(.allow)
-            } else {
-                if let url = navigationAction.request.url,
-                   url.scheme == "http" || url.scheme == "https" {
-                    UIApplication.shared.open(url)
-                }
+            // Only intercept explicit link taps that navigate to an external http/https URL.
+            // All other navigation types (reload, form submit, back/forward, JS-initiated,
+            // hash fragments) are allowed so in-page interactions like "Play Again" work.
+            if navigationAction.navigationType == .linkActivated,
+               let url = navigationAction.request.url,
+               url.scheme == "http" || url.scheme == "https" {
+                UIApplication.shared.open(url)
                 decisionHandler(.cancel)
+            } else {
+                decisionHandler(.allow)
             }
         }
 
@@ -427,20 +495,16 @@ struct StreamingWebPreview: UIViewRepresentable {
           }
 
           // ── Reconcile: incremental update during streaming ──
-          // Scripts are intentionally NOT executed — avoids repeat execution on every token.
+          // Scripts are NOT executed during streaming to avoid repeat execution per token.
+          // Fully-closed script pairs are stripped; if an unclosed opening tag remains,
+          // content is cut before it so preceding HTML stays visible mid-stream.
           var _stripScriptPaired = /<script[\\s\\S]*?<\\/script>/gi;
-          var _stripScriptOpen   = /<script[\\s\\S]*$/i;
           function reconcileContent(html) {
-            // If a <body> tag is already present, extractBody will strip the <head>
-            // (including all head <script> tags). In that case _stripScriptOpen is not
-            // needed and must NOT run — it would otherwise eat the entire body content
-            // from the first unclosed inline <script> onward, leaving the render blank.
-            var hadBody = /<body[^>]*>/i.test(html);
             html = extractBody(html);
-            var stripped = hadBody
-              ? html.replace(_stripScriptPaired, '')
-              : html.replace(_stripScriptPaired, '').replace(_stripScriptOpen, '');
-            var safe = safeCutHTML(stripped);
+            var cleaned = html.replace(_stripScriptPaired, '');
+            var openIdx = cleaned.search(/<script/i);
+            var trimmed = openIdx >= 0 ? cleaned.slice(0, openIdx) : cleaned;
+            var safe = safeCutHTML(trimmed);
             if (!safe) return;
             document.getElementById('render').innerHTML = safe;
             scheduleHeight();

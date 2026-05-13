@@ -112,9 +112,7 @@ struct ChannelDetailView: View {
                 }
             }
             .background(theme.background)
-            .padding(.bottom, keyboard.height)
         }
-        .ignoresSafeArea(.keyboard)
         .overlay(alignment: .bottom) {
             if isShowingChannelPicker {
                 ChannelLinkPickerView(

@@ -96,6 +96,12 @@ struct StreamingMarkdownView: View {
 
     var body: some View {
         unifiedBody
+            // Animate layout changes only when streaming ends (isStreaming flips false→true
+            // is intentionally excluded — animating during streaming would create per-token
+            // animations at 60fps and re-introduce the old AttributeGraph cycle).
+            // The `.value:` key ensures this animation fires exactly once per stream end,
+            // smoothing the height settle when the final parse delivers its result.
+            .animation(.easeOut(duration: 0.18), value: isStreaming)
             .onAppear {
                 rebuildThemeIfNeeded()
             }
@@ -139,13 +145,19 @@ struct StreamingMarkdownView: View {
             let segments: [ContentSegment] = resolveSegments()
             if segments.isEmpty {
                 EmptyView()
-            } else if segments.count == 1, case .markdown(let text) = segments[0] {
+            } else if segments.count == 1, case .markdown(let text) = segments[0].kind {
                 // Fast path: plain markdown only — no viz, no ForEach overhead.
                 MarkdownView(text, theme: cachedTheme)
                     .codeAutoScroll(true)
             } else {
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
+                    // Use stable type-based IDs so SwiftUI updates each segment
+                    // in-place rather than destroying and recreating it when the
+                    // segments array grows (e.g. prose → prose + streamingCode).
+                    // With offset-based IDs, every new segment insertion shifts
+                    // all subsequent offsets, invalidating @State measuredHeight
+                    // in each nested MarkdownView and causing a frame-of-collapse.
+                    ForEach(segments) { segment in
                         segmentView(for: segment)
                     }
                 }
@@ -183,18 +195,18 @@ struct StreamingMarkdownView: View {
 
             case .streaming(let proseBeforeMarker, let vizContent):
                 let _ = vizLog.debug("StreamingMarkdownView: .streaming — proseLen=\(proseBeforeMarker.count), vizLen=\(vizContent.count)")
-                return [.markdown(proseBeforeMarker), .visualization(vizContent)]
+                return [.markdown(proseBeforeMarker, index: 0), .visualization(vizContent, index: 0)]
 
             case .complete:
                 let preViz = extractPreVizText(content)
                 let postViz = extractPostVizText(content)
                 let _ = vizLog.debug("StreamingMarkdownView: .complete during streaming — preVizLen=\(preViz.count), postVizLen=\(postViz.count)")
                 var result: [ContentSegment] = []
-                result.append(.markdown(preViz))
+                result.append(.markdown(preViz, index: 0))
                 let vizContent = extractVizContent(content)
-                result.append(.visualization(vizContent))
+                result.append(.visualization(vizContent, index: 0))
                 if !postViz.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    result.append(.markdown(postViz))
+                    result.append(.markdown(postViz, index: 1))
                 }
                 return result
             }
@@ -279,16 +291,16 @@ struct StreamingMarkdownView: View {
                 let tag = segmentCache.fenceMakeSegTag
                 let makeSeg: (String) -> ContentSegment = { content in
                     switch tag {
-                    case "html":    return .html(content, isStreaming: true)
-                    case "svg":     return .svg(content, isStreaming: true)
-                    case "mermaid": return .mermaid(content, isStreaming: true)
-                    default:        return .chart(content, isStreaming: true)
+                    case "html":    return .html(content, isStreaming: true, index: 0)
+                    case "svg":     return .svg(content, isStreaming: true, index: 0)
+                    case "mermaid": return .mermaid(content, isStreaming: true, index: 0)
+                    default:        return .chart(content, isStreaming: true, index: 0)
                     }
                 }
                 let before = segmentCache.fenceBeforeText
                 var result: [ContentSegment] = []
                 if !before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    result.append(.markdown(before))
+                    result.append(.markdown(before, index: 0))
                 }
                 if !partialContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     result.append(makeSeg(partialContent))
@@ -299,9 +311,9 @@ struct StreamingMarkdownView: View {
                 let before = segmentCache.fenceBeforeText
                 var result: [ContentSegment] = []
                 if !before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    result.append(.markdown(before))
+                    result.append(.markdown(before, index: 0))
                 }
-                result.append(.streamingCode(partialContent, language: segmentCache.fenceLanguage))
+                result.append(.streamingCode(partialContent, language: segmentCache.fenceLanguage, index: 0))
                 return result
             }
         }
@@ -341,15 +353,15 @@ struct StreamingMarkdownView: View {
 
             let makeSeg: (String) -> ContentSegment = { content in
                 switch langKey {
-                case "html":    return .html(content, isStreaming: true)
-                case "svg":     return .svg(content, isStreaming: true)
-                case "mermaid": return .mermaid(content, isStreaming: true)
-                default:        return .chart(content, isStreaming: true)
+                case "html":    return .html(content, isStreaming: true, index: 0)
+                case "svg":     return .svg(content, isStreaming: true, index: 0)
+                case "mermaid": return .mermaid(content, isStreaming: true, index: 0)
+                default:        return .chart(content, isStreaming: true, index: 0)
                 }
             }
             var result: [ContentSegment] = []
             if !before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                result.append(.markdown(before))
+                result.append(.markdown(before, index: 0))
             }
             if !partialContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 result.append(makeSeg(partialContent))
@@ -387,9 +399,9 @@ struct StreamingMarkdownView: View {
 
             var result: [ContentSegment] = []
             if !before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                result.append(.markdown(before))
+                result.append(.markdown(before, index: 0))
             }
-            result.append(.streamingCode(partialContent, language: language))
+            result.append(.streamingCode(partialContent, language: language, index: 0))
             return result
         } else {
             // Fence line still arriving (e.g. "```python" with no \n yet).
@@ -399,10 +411,10 @@ struct StreamingMarkdownView: View {
             let before = String(text[text.startIndex..<fenceStart.lowerBound])
             var result: [ContentSegment] = []
             if !before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                result.append(.markdown(before))
+                result.append(.markdown(before, index: 0))
             }
             // Still emit .streamingCode with empty content to stabilise view identity.
-            result.append(.streamingCode(partialContent, language: language))
+            result.append(.streamingCode(partialContent, language: language, index: 0))
             return result
         }
     }
@@ -448,7 +460,7 @@ struct StreamingMarkdownView: View {
     /// being recreated.
     @ViewBuilder
     private func segmentView(for segment: ContentSegment) -> some View {
-        switch segment {
+        switch segment.kind {
         case .markdown(let text):
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 MarkdownView(text, theme: cachedTheme)
@@ -509,29 +521,92 @@ struct StreamingMarkdownView: View {
 
     private let pythonLanguageTags: Set<String> = ["python", "python3", "py"]
 
-    private enum ContentSegment {
-        case markdown(String)
-        /// `isStreaming` — true while the closing ``` fence has not yet arrived.
-        case chart(String, isStreaming: Bool)
-        /// `isStreaming` — true while the closing ``` fence has not yet arrived.
-        case html(String, isStreaming: Bool)
-        /// `isStreaming` — true while the closing ``` fence has not yet arrived.
-        case mermaid(String, isStreaming: Bool)
-        /// `isStreaming` — true while the closing ``` fence has not yet arrived.
-        case svg(String, isStreaming: Bool)
-        case python(String)
-        /// A code block being actively streamed (unclosed fence). Rendered via
-        /// `StreamingCodeBlockView` which uses O(delta) incremental appends and
-        /// O(viewport) virtual line windowing — bypasses IncrementalStreamingParser
-        /// entirely to avoid O(n²) re-parse lag on large blocks.
-        case streamingCode(String, language: String)
-        /// A finalized (closed fence) large plain code block (>50 lines). Rendered
-        /// via `StreamingCodeBlockView(isStreaming: false)` to bypass the O(n)
-        /// CommonMark full-parse spike ("Frame of Doom") that MarkdownView triggers
-        /// the moment a big code block transitions from streaming → done.
-        case code(String, language: String)
-        case markdownImage(imageURL: URL, altText: String, linkURL: URL?)
-        case visualization(String)
+    /// A single renderable slice of message content.
+    ///
+    /// ## Stable Identity
+    /// `id` is a type-qualified position string (e.g. `"markdown-0"`, `"code-1"`,
+    /// `"html-0"`). This keeps SwiftUI's ForEach identity stable when the last
+    /// segment grows (streaming append) or when a new segment is appended at the
+    /// end — existing views are updated in-place rather than destroyed/recreated.
+    /// Offset-only IDs (`id: \.offset`) caused @State measuredHeight resets in
+    /// nested MarkdownView instances on every segment-count change, producing
+    /// a frame-of-collapsed-height visual glitch.
+    private struct ContentSegment: Identifiable {
+        enum Kind {
+            case markdown(String)
+            /// `isStreaming` — true while the closing ``` fence has not yet arrived.
+            case chart(String, isStreaming: Bool)
+            /// `isStreaming` — true while the closing ``` fence has not yet arrived.
+            case html(String, isStreaming: Bool)
+            /// `isStreaming` — true while the closing ``` fence has not yet arrived.
+            case mermaid(String, isStreaming: Bool)
+            /// `isStreaming` — true while the closing ``` fence has not yet arrived.
+            case svg(String, isStreaming: Bool)
+            case python(String)
+            /// A code block being actively streamed (unclosed fence). Rendered via
+            /// `StreamingCodeBlockView` which uses O(delta) incremental appends and
+            /// O(viewport) virtual line windowing — bypasses IncrementalStreamingParser
+            /// entirely to avoid O(n²) re-parse lag on large blocks.
+            case streamingCode(String, language: String)
+            /// A finalized (closed fence) large plain code block (>50 lines). Rendered
+            /// via `StreamingCodeBlockView(isStreaming: false)` to bypass the O(n)
+            /// CommonMark full-parse spike ("Frame of Doom") that MarkdownView triggers
+            /// the moment a big code block transitions from streaming → done.
+            case code(String, language: String)
+            case markdownImage(imageURL: URL, altText: String, linkURL: URL?)
+            case visualization(String)
+
+            /// Short type tag used in the stable `id`.
+            var typeTag: String {
+                switch self {
+                case .markdown:      return "md"
+                case .chart:         return "chart"
+                case .html:          return "html"
+                case .mermaid:       return "mermaid"
+                case .svg:           return "svg"
+                case .python:        return "python"
+                case .streamingCode: return "scode"
+                case .code:          return "code"
+                case .markdownImage: return "img"
+                case .visualization: return "viz"
+                }
+            }
+        }
+
+        let id: String
+        let kind: Kind
+
+        // Convenience factory methods mirror the old enum cases for minimal call-site changes.
+        static func markdown(_ text: String, index: Int = 0) -> ContentSegment {
+            ContentSegment(id: "md-\(index)", kind: .markdown(text))
+        }
+        static func chart(_ code: String, isStreaming: Bool, index: Int = 0) -> ContentSegment {
+            ContentSegment(id: "chart-\(index)", kind: .chart(code, isStreaming: isStreaming))
+        }
+        static func html(_ code: String, isStreaming: Bool, index: Int = 0) -> ContentSegment {
+            ContentSegment(id: "html-\(index)", kind: .html(code, isStreaming: isStreaming))
+        }
+        static func mermaid(_ code: String, isStreaming: Bool, index: Int = 0) -> ContentSegment {
+            ContentSegment(id: "mermaid-\(index)", kind: .mermaid(code, isStreaming: isStreaming))
+        }
+        static func svg(_ code: String, isStreaming: Bool, index: Int = 0) -> ContentSegment {
+            ContentSegment(id: "svg-\(index)", kind: .svg(code, isStreaming: isStreaming))
+        }
+        static func python(_ code: String, index: Int = 0) -> ContentSegment {
+            ContentSegment(id: "python-\(index)", kind: .python(code))
+        }
+        static func streamingCode(_ code: String, language: String, index: Int = 0) -> ContentSegment {
+            ContentSegment(id: "scode-\(index)", kind: .streamingCode(code, language: language))
+        }
+        static func code(_ code: String, language: String, index: Int = 0) -> ContentSegment {
+            ContentSegment(id: "code-\(index)", kind: .code(code, language: language))
+        }
+        static func markdownImage(imageURL: URL, altText: String, linkURL: URL?, index: Int = 0) -> ContentSegment {
+            ContentSegment(id: "img-\(index)", kind: .markdownImage(imageURL: imageURL, altText: altText, linkURL: linkURL))
+        }
+        static func visualization(_ html: String, index: Int = 0) -> ContentSegment {
+            ContentSegment(id: "viz-\(index)", kind: .visualization(html))
+        }
     }
 
     // MARK: - Markdown Image Regex Patterns
@@ -635,12 +710,13 @@ struct StreamingMarkdownView: View {
             for seg in vizSegments {
                 switch seg {
                 case .text(let chunk):
-                    result.append(contentsOf: parseImagesAndCodeBlocks(chunk))
+                    result.append(contentsOf: parseImagesAndCodeBlocks(chunk, baseOffset: result.count))
                 case .visualization(let html):
-                    result.append(.visualization(html))
+                    let vizIdx = result.filter { if case .visualization = $0.kind { return true }; return false }.count
+                    result.append(.visualization(html, index: vizIdx))
                 }
             }
-            return result.isEmpty ? [.markdown(text)] : result
+            return result.isEmpty ? [.markdown(text, index: 0)] : result
         }
 
         // 1) Extract markdown images first, splitting the text around them.
@@ -649,7 +725,7 @@ struct StreamingMarkdownView: View {
 
         if images.isEmpty {
             // No images — fall through to code-block parsing directly.
-            return parseCodeBlocks(text)
+            return parseCodeBlocks(text, baseOffset: 0)
         }
 
         var segments: [ContentSegment] = []
@@ -660,41 +736,43 @@ struct StreamingMarkdownView: View {
             if cursor < img.range.lowerBound {
                 let preceding = String(text[cursor..<img.range.lowerBound])
                 // Parse code blocks within the preceding text chunk
-                segments.append(contentsOf: parseCodeBlocks(preceding))
+                segments.append(contentsOf: parseCodeBlocks(preceding, baseOffset: segments.count))
             }
             // The image itself
-            segments.append(.markdownImage(imageURL: img.imageURL, altText: img.altText, linkURL: img.linkURL))
+            let imgIdx = segments.filter { if case .markdownImage = $0.kind { return true }; return false }.count
+            segments.append(.markdownImage(imageURL: img.imageURL, altText: img.altText, linkURL: img.linkURL, index: imgIdx))
             cursor = img.range.upperBound
         }
 
         // Remaining text after the last image
         if cursor < text.endIndex {
             let remaining = String(text[cursor..<text.endIndex])
-            segments.append(contentsOf: parseCodeBlocks(remaining))
+            segments.append(contentsOf: parseCodeBlocks(remaining, baseOffset: segments.count))
         }
 
-        return segments.isEmpty ? [.markdown(text)] : segments
+        return segments.isEmpty ? [.markdown(text, index: 0)] : segments
     }
 
     /// Convenience combining markdown-image extraction and code-block parsing.
     /// Used by `parseSpecialBlocks` when splitting text chunks from VIZ segments.
-    private func parseImagesAndCodeBlocks(_ text: String) -> [ContentSegment] {
+    private func parseImagesAndCodeBlocks(_ text: String, baseOffset: Int = 0) -> [ContentSegment] {
         let images = findMarkdownImages(in: text)
-        guard !images.isEmpty else { return parseCodeBlocks(text) }
+        guard !images.isEmpty else { return parseCodeBlocks(text, baseOffset: baseOffset) }
 
         var segments: [ContentSegment] = []
         var cursor = text.startIndex
         for img in images {
             if cursor < img.range.lowerBound {
-                segments.append(contentsOf: parseCodeBlocks(String(text[cursor..<img.range.lowerBound])))
+                segments.append(contentsOf: parseCodeBlocks(String(text[cursor..<img.range.lowerBound]), baseOffset: baseOffset + segments.count))
             }
-            segments.append(.markdownImage(imageURL: img.imageURL, altText: img.altText, linkURL: img.linkURL))
+            let imgIdx = segments.filter { if case .markdownImage = $0.kind { return true }; return false }.count
+            segments.append(.markdownImage(imageURL: img.imageURL, altText: img.altText, linkURL: img.linkURL, index: imgIdx))
             cursor = img.range.upperBound
         }
         if cursor < text.endIndex {
-            segments.append(contentsOf: parseCodeBlocks(String(text[cursor..<text.endIndex])))
+            segments.append(contentsOf: parseCodeBlocks(String(text[cursor..<text.endIndex]), baseOffset: baseOffset + segments.count))
         }
-        return segments.isEmpty ? [.markdown(text)] : segments
+        return segments.isEmpty ? [.markdown(text, index: baseOffset)] : segments
     }
 
     // MARK: - CommonMark fence helpers
@@ -760,8 +838,8 @@ struct StreamingMarkdownView: View {
     /// handles nested code blocks (e.g. a ``` outer block containing ```bash inner
     /// blocks — the inner ```bash lines are NOT mistaken for closers because they
     /// have an info string).
-    private func parseCodeBlocks(_ text: String) -> [ContentSegment] {
-        guard text.contains("```") else { return [.markdown(text)] }
+    private func parseCodeBlocks(_ text: String, baseOffset: Int = 0) -> [ContentSegment] {
+        guard text.contains("```") else { return [.markdown(text, index: baseOffset)] }
 
         // Split into lines for fence detection. We work line-by-line so we can
         // apply the CommonMark closer rules precisely.
@@ -790,7 +868,8 @@ struct StreamingMarkdownView: View {
             if proseLinesStart < i {
                 let proseText = lines[proseLinesStart..<i].joined(separator: "\n")
                 if !proseText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    segments.append(.markdown(proseText))
+                    let mdIdx = baseOffset + segments.filter { if case .markdown = $0.kind { return true }; return false }.count
+                    segments.append(.markdown(proseText, index: mdIdx))
                 }
             }
 
@@ -804,30 +883,33 @@ struct StreamingMarkdownView: View {
             let isSVG = lang == "svg" && looksLikeSVG(codeContent)
             let isPython = pythonLanguageTags.contains(lang) && codeContent.trimmingCharacters(in: .whitespacesAndNewlines).count >= 2
 
+            // Per-type index for stable segment identity within this parse.
+            let typeIdx = baseOffset + segments.count
             if isChart {
-                segments.append(.chart(codeContent, isStreaming: false))
+                segments.append(.chart(codeContent, isStreaming: false, index: typeIdx))
             } else if isMermaid {
-                segments.append(.mermaid(codeContent, isStreaming: false))
+                segments.append(.mermaid(codeContent, isStreaming: false, index: typeIdx))
             } else if isSVG {
-                segments.append(.svg(codeContent, isStreaming: false))
+                segments.append(.svg(codeContent, isStreaming: false, index: typeIdx))
             } else if isPython {
-                segments.append(.python(codeContent))
+                segments.append(.python(codeContent, index: typeIdx))
             } else if isHTML {
-                segments.append(.html(codeContent, isStreaming: false))
+                segments.append(.html(codeContent, isStreaming: false, index: typeIdx))
             } else {
                 // Plain code block. For large blocks (>50 lines) use StreamingCodeBlockView
                 // with isStreaming:false to avoid the O(n) CommonMark full-parse spike
                 // ("Frame of Doom") that MarkdownView triggers on the streaming→done transition.
                 let lineCount = codeContent.components(separatedBy: "\n").count
                 if lineCount > 50 {
-                    segments.append(.code(codeContent, language: lang))
+                    segments.append(.code(codeContent, language: lang, index: typeIdx))
                 } else {
                     // Small block — reconstruct fenced markdown so MarkdownView renders it
                     // with syntax highlighting. Any literal ``` inside the code content
                     // (e.g. from nested blocks) are preserved as-is.
-                    let fence = String(repeating: "`", count: openerTickCount)
-                    let fencedBlock = "\(fence)\(lang)\n\(codeContent)\n\(fence)"
-                    segments.append(.markdown(fencedBlock))
+                    let fenceStr = String(repeating: "`", count: openerTickCount)
+                    let fencedBlock = "\(fenceStr)\(lang)\n\(codeContent)\n\(fenceStr)"
+                    let mdIdx = baseOffset + segments.filter { if case .markdown = $0.kind { return true }; return false }.count
+                    segments.append(.markdown(fencedBlock, index: mdIdx))
                 }
             }
 
@@ -839,11 +921,12 @@ struct StreamingMarkdownView: View {
         if proseLinesStart < lines.count {
             let trailingText = lines[proseLinesStart...].joined(separator: "\n")
             if !trailingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                segments.append(.markdown(trailingText))
+                let mdIdx = baseOffset + segments.filter { if case .markdown = $0.kind { return true }; return false }.count
+                segments.append(.markdown(trailingText, index: mdIdx))
             }
         }
 
-        return segments.isEmpty ? [.markdown(text)] : segments
+        return segments.isEmpty ? [.markdown(text, index: baseOffset)] : segments
     }
 
     private func looksLikeChartJSON(_ code: String) -> Bool {

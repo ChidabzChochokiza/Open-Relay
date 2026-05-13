@@ -42,6 +42,9 @@ struct ChannelInputField: View {
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityScale) private var accessibilityScale
 
+    /// UI chrome scale (buttons, icons, touch targets) — mirrors AccessibilityManager.uiScale.
+    private var uiScale: CGFloat { accessibilityScale.scale(for: .ui) }
+
     // MARK: - User preference
 
     @AppStorage("sendOnEnter") private var sendOnEnter = true
@@ -65,6 +68,14 @@ struct ChannelInputField: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // Invisible full-coverage tap target so tapping anywhere on the
+            // composer (including padding areas) focuses the text field.
+            Color.clear
+                .frame(height: 0)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    NotificationCenter.default.post(name: .chatInputFieldRequestFocus, object: nil)
+                }
             // Attachment preview strip
             if !attachments.isEmpty {
                 attachmentStrip
@@ -85,9 +96,9 @@ struct ChannelInputField: View {
                         Haptics.play(.light)
                     } label: {
                         Image(systemName: "plus")
-                            .scaledFont(size: 15, weight: .semibold)
+                            .scaledFont(size: 15 * uiScale, weight: .semibold)
                             .foregroundStyle(theme.textTertiary)
-                            .frame(width: 28, height: 28)
+                            .frame(width: 28 * uiScale, height: 28 * uiScale)
                     }
                     .buttonStyle(.plain)
                     .disabled(!isEnabled)
@@ -132,10 +143,10 @@ struct ChannelInputField: View {
                     } label: {
                         Circle()
                             .fill(theme.brandPrimary)
-                            .frame(width: 30, height: 30)
+                            .frame(width: 30 * uiScale, height: 30 * uiScale)
                             .overlay(
                                 Image(systemName: "arrow.up")
-                                    .scaledFont(size: 13, weight: .bold)
+                                    .scaledFont(size: 13 * uiScale, weight: .bold)
                                     .foregroundStyle(theme.brandOnPrimary)
                             )
                     }

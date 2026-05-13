@@ -141,6 +141,9 @@ struct ChatInputField: View {
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityScale) private var accessibilityScale
     @FocusState private var isFocused: Bool
+
+    /// UI chrome scale (buttons, icons, touch targets) — mirrors AccessibilityManager.uiScale.
+    private var uiScale: CGFloat { accessibilityScale.scale(for: .ui) }
     @State private var showToolsSheet = false
     @State private var previewingAttachment: ChatAttachment? = nil
 
@@ -262,6 +265,16 @@ struct ChatInputField: View {
 
     private var composerShell: some View {
         VStack(spacing: 0) {
+            // Invisible full-coverage tap target so tapping anywhere on the
+            // composer (including padding areas) focuses the text field.
+            // Uses the existing widget-focus notification that PasteInterceptingTextView
+            // already observes, so no new coupling is needed.
+            Color.clear
+                .frame(height: 0)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    NotificationCenter.default.post(name: .chatInputFieldRequestFocus, object: nil)
+                }
             // Model override chip (above text input)
             if mentionedModel != nil {
                 mentionedModelChip
@@ -370,10 +383,10 @@ struct ChatInputField: View {
                             ? theme.brandPrimary.opacity(0.12)
                             : Color.clear
                     )
-                    .frame(width: 28, height: 28)
+                    .frame(width: 28 * uiScale, height: 28 * uiScale)
 
                 Image(systemName: "plus")
-                    .scaledFont(size: 15, weight: .semibold)
+                    .scaledFont(size: 15 * uiScale, weight: .semibold)
                     .foregroundStyle(hasActiveFeatures ? theme.brandPrimary : theme.textTertiary)
                     .contentTransition(.symbolEffect(.replace))
             }
@@ -514,10 +527,10 @@ struct ChatInputField: View {
                     ? theme.brandPrimary.opacity(0.12)
                     : Color.clear
             )
-            .frame(width: 26, height: 26)
+            .frame(width: 26 * uiScale, height: 26 * uiScale)
             .overlay(
                 Image(systemName: "terminal")
-                    .scaledFont(size: 11, weight: .semibold)
+                    .scaledFont(size: 11 * uiScale, weight: .semibold)
                     .foregroundStyle(
                         terminalEnabled
                             ? theme.brandPrimary
@@ -551,10 +564,10 @@ struct ChatInputField: View {
             } label: {
                 Circle()
                     .fill(Color.clear)
-                    .frame(width: 26, height: 26)
+                    .frame(width: 26 * uiScale, height: 26 * uiScale)
                     .overlay(
                         Image(systemName: "mic")
-                            .scaledFont(size: 12, weight: .semibold)
+                            .scaledFont(size: 12 * uiScale, weight: .semibold)
                             .foregroundStyle(theme.textTertiary)
                     )
             }
@@ -578,10 +591,10 @@ struct ChatInputField: View {
                 } label: {
                     Circle()
                         .fill(theme.error.opacity(0.15))
-                        .frame(width: 26, height: 26)
+                        .frame(width: 26 * uiScale, height: 26 * uiScale)
                         .overlay(
                             Image(systemName: "stop.fill")
-                                .scaledFont(size: 10, weight: .bold)
+                                .scaledFont(size: 10 * uiScale, weight: .bold)
                                 .foregroundStyle(theme.error)
                         )
                 }
@@ -597,10 +610,10 @@ struct ChatInputField: View {
                 } label: {
                     Circle()
                         .fill(theme.brandPrimary)
-                        .frame(width: 26, height: 26)
+                        .frame(width: 26 * uiScale, height: 26 * uiScale)
                         .overlay(
                             Image(systemName: "arrow.up")
-                                .scaledFont(size: 11, weight: .bold)
+                                .scaledFont(size: 11 * uiScale, weight: .bold)
                                 .foregroundStyle(theme.brandOnPrimary)
                         )
                 }
@@ -626,10 +639,10 @@ struct ChatInputField: View {
                             ),
                             lineWidth: 1.5
                         )
-                        .frame(width: 26, height: 26)
+                        .frame(width: 26 * uiScale, height: 26 * uiScale)
                         .overlay(
                             Image(systemName: "waveform")
-                                .scaledFont(size: 11, weight: .semibold)
+                                .scaledFont(size: 11 * uiScale, weight: .semibold)
                                 .foregroundStyle(theme.brandPrimary)
                         )
                 }
@@ -663,9 +676,9 @@ struct ChatInputField: View {
                     onVoiceInput()
                 } label: {
                     Image(systemName: "waveform")
-                        .scaledFont(size: 13, weight: .semibold)
+                        .scaledFont(size: 13 * uiScale, weight: .semibold)
                         .foregroundStyle(theme.brandPrimary)
-                        .frame(width: 30, height: 26)
+                        .frame(width: 30 * uiScale, height: 26 * uiScale)
                         .background(
                             Capsule()
                                 .strokeBorder(

@@ -83,11 +83,18 @@ enum Haptics {
     }
 
     /// Plays a streaming token haptic — throttled internally to ~3 Hz.
-    /// Reduced from 10 Hz to minimize Taptic Engine overhead during fast
-    /// token streaming. Each impactOccurred() call costs ~0.5ms of main
-    /// thread time; at 10 Hz that's 5ms/sec of pure haptic overhead.
-    /// At 3 Hz it's 1.5ms/sec — barely noticeable on the frame budget.
+    ///
+    /// Called from `StreamingContentStore.applySnapshot()` so it fires in sync
+    /// with characters actually appearing on screen (drain clock), not with raw
+    /// server token arrival. This ensures haptics are felt throughout the full
+    /// typewriter effect on fast models where token batches arrive faster than
+    /// the drain reveals them.
+    ///
+    /// Reads the user preference directly from UserDefaults on every call
+    /// (safe at 3 Hz). Also enforces the throttle internally — callers do not
+    /// need their own rate-limiting.
     static func streamingTick() {
+        guard UserDefaults.standard.object(forKey: "streamingHaptics") as? Bool ?? true else { return }
         let now = CFAbsoluteTimeGetCurrent()
         guard now - _lastStreamingTime >= 0.33 else { return }
         _lastStreamingTime = now

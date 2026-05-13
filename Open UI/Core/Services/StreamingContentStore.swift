@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UIKit
 import os.log
 
 // MARK: - StreamingContentStore (thin @MainActor observable wrapper)
@@ -179,6 +180,11 @@ final class StreamingContentStore {
 
     private func applySnapshot(_ snapshot: StreamingSnapshot) {
         if snapshot.isActive {
+            // Fire haptic in sync with the typewriter drain — characters are
+            // actually appearing on screen right now. Using utf8.count is O(1)
+            // (Swift stores it directly on the String) and avoids a full O(N)
+            // character count call on every 60 Hz tick.
+            let didReveal = snapshot.displayContent.utf8.count > displayContent.utf8.count
             displayContent               = snapshot.displayContent
             frozenBoundary               = snapshot.frozenBoundary
             frozenContent                = snapshot.frozenContent
@@ -190,6 +196,7 @@ final class StreamingContentStore {
             frozenToolBoundaryOffset     = snapshot.frozenToolBoundaryOffset
             frozenReasoningBoundaryOffset = snapshot.frozenReasoningBoundaryOffset
             frozenProseBoundaryOffset    = snapshot.frozenProseBoundaryOffset
+            if didReveal { Haptics.streamingTick() }
         } else {
             completeCleanup()
         }

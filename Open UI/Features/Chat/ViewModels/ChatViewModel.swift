@@ -2178,7 +2178,6 @@ final class ChatViewModel {
                     conversation?.messages[index].content += contentDelta
                 }
                 conversation?.messages[index].isStreaming = true
-                triggerStreamingHaptic()
             }
 
             // Also check for done signal within content events (chat:completion
@@ -5453,22 +5452,6 @@ final class ChatViewModel {
             extractAndApplyTasksFromContent(content)
         }
 
-        // Trigger streaming haptic feedback (throttled to ~10 Hz to avoid
-        // overwhelming the Taptic Engine while still feeling responsive)
-        if isStreaming && error == nil {
-            triggerStreamingHaptic()
-        }
-    }
-
-    /// Fires a subtle haptic pulse during token streaming, throttled to ~3 Hz
-    /// by the centralized `Haptics` service. Reads the preference directly from
-    /// UserDefaults — this is safe at 3 Hz and avoids the stale-cache bug where
-    /// `UserDefaults.didChangeNotification` was not reliably firing for in-process
-    /// `@AppStorage` writes, making the toggle appear to work but have no effect.
-    private func triggerStreamingHaptic() {
-        // Default is true — only skip if the user explicitly turned it off.
-        guard UserDefaults.standard.object(forKey: "streamingHaptics") as? Bool ?? true else { return }
-        Haptics.streamingTick()
     }
 
     private func appendStatusUpdate(id: String, status: ChatStatusUpdate) {

@@ -1,5 +1,22 @@
 # Changelog
 
+## v4.3 — May 13, 2026
+
+### What's New
+- Hold on any message text to select and copy — long-press text selection now works alongside the existing double-tap.
+
+### Improvements
+- Input bar buttons and icons now scale with your Accessibility UI Scale setting in both chat and channel views.
+- Code block/native visualization performance has been drastically improved - While streaming code blocks that could contain 600+ lines, UI remains responsive and lag free!
+- Markdown underlying improvements.
+
+### Bug Fixes
+- Fixed streaming haptics not firing during streaming.
+- Fixed the message composer requiring multiple taps to open the keyboard — tapping anywhere on the input bar now reliably focuses it.
+- Fixed a jitter when dismissing the keyboard by scrolling — the input bar now glides down in perfect sync with the keyboard instead of snapping after it closes.
+- Fixed continuous main-thread animation frames competing with the WebContent render during HTML streaming, causing visible lag when JS-heavy content streams in.
+
+
 ## v4.2.2 — May 12, 2026
 
 ### Bug Fixes

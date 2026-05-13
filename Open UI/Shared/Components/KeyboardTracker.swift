@@ -96,9 +96,22 @@ final class KeyboardTracker {
         animationDuration = duration
         animationCurve = curve
 
-        withAnimation(swiftUIAnimation(duration: duration, curve: curve)) {
+        // During an interactive scroll-to-dismiss gesture, iOS fires rapid
+        // keyboardWillChangeFrame events with near-zero durations. Animating
+        // each of these creates competing SwiftUI transactions that cause the
+        // input bar to jitter as the keyboard slides away. Instead, track the
+        // frame directly (no animation) so the bar moves in perfect sync with
+        // the user's finger. Only intentional show/hide events (visible != nil)
+        // or deliberate frame changes with a real duration get a SwiftUI animation.
+        let isInteractiveTracking = visible == nil && duration < 0.05
+        if isInteractiveTracking {
             height = adjustedHeight
             isVisible = newVisible
+        } else {
+            withAnimation(swiftUIAnimation(duration: duration, curve: curve)) {
+                height = adjustedHeight
+                isVisible = newVisible
+            }
         }
     }
 

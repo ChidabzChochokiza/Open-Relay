@@ -496,6 +496,11 @@ actor StreamingPipeline {
                 break
             }
         }
+        // VIZ blocks (@@@VIZ-START…@@@VIZ-END) are also large HTML payloads —
+        // drain at 500 chars/frame so InlineVisualizerView receives content fast.
+        if !result && content.contains("@@@VIZ-START") && !content.contains("\n@@@VIZ-END") {
+            result = true
+        }
         _livePreviewFenceCache = (count, result)
         return result
     }
@@ -662,6 +667,11 @@ actor StreamingPipeline {
             fenceCount += 1; cur = r.upperBound
         }
         guard fenceCount % 2 == 0 else { return 0 }
+        // Don't freeze a boundary inside an open VIZ block — doing so would split
+        // @@@VIZ-START…content across pureFrozenProse/pureLiveProse, causing the
+        // live tail to lose the marker and InlineVisualizerView to never appear.
+        let hasUnclosedViz = textBefore.contains("@@@VIZ-START") && !textBefore.contains("\n@@@VIZ-END")
+        guard !hasUnclosedViz else { return 0 }
         return text.distance(from: text.startIndex, to: boundaryIdx)
     }
 }
