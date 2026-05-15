@@ -96,6 +96,11 @@ final class SocketIOService: NSObject, @unchecked Sendable, URLSessionWebSocketD
     /// Whether auto-reconnect is enabled. Disabled on intentional disconnect.
     private var autoReconnectEnabled = true
 
+    /// Whether the app is currently in the background.
+    /// While backgrounded, we pause the reconnect backoff timer and reconnect
+    /// immediately when the app returns to the foreground.
+    private var isAppInBackground = false
+
     /// Maximum number of reconnection attempts before giving up.
     /// After this, the socket stays disconnected until manually reconnected.
     private let maxReconnectAttempts = 50
@@ -128,6 +133,37 @@ final class SocketIOService: NSObject, @unchecked Sendable, URLSessionWebSocketD
         self.serverConfig = serverConfig
         self.authToken = authToken
         super.init()
+    }
+
+    // MARK: - App Lifecycle
+
+    /// Called when the app moves to the background.
+    /// Cancels pending reconnect timers to prevent wasted attempts while
+    /// the OS has us suspended.
+    func markAppBackground() {
+        isAppInBackground = true
+        // Cancel any pending reconnect timer — we'll reconnect immediately on foreground
+        DispatchQueue.main.async { [weak self] in
+            self?.reconnectTimer?.invalidate()
+            self?.reconnectTimer = nil
+        }
+    }
+
+    /// Called when the app returns to the foreground.
+    /// If the socket is disconnected, reconnects immediately instead of waiting
+    /// out the remaining backoff delay.
+    func resetBackoffAndReconnect() {
+        isAppInBackground = false
+        // Cancel any pending reconnect timer
+        DispatchQueue.main.async { [weak self] in
+            self?.reconnectTimer?.invalidate()
+            self?.reconnectTimer = nil
+        }
+        // Reset backoff counter so the next reconnect starts from attempt 0
+        reconnectAttempt = 0
+        guard !isConnected, !isConnecting, autoReconnectEnabled else { return }
+        reconnectCount += 1
+        connect()
     }
 
     // MARK: - Connection
@@ -987,7 +1023,17 @@ final class SocketIOService: NSObject, @unchecked Sendable, URLSessionWebSocketD
     }
 
     private func scheduleReconnect() {
-        reconnectTimer?.invalidate()
+        // Invalidate on main thread immediately to prevent the race where a
+        // rapid second disconnect fires before the first async block runs.
+        if Thread.isMainThread {
+            reconnectTimer?.invalidate()
+            reconnectTimer = nil
+        } else {
+            DispatchQueue.main.sync { [weak self] in
+                self?.reconnectTimer?.invalidate()
+                self?.reconnectTimer = nil
+            }
+        }
 
         guard autoReconnectEnabled else {
             connectionState = .disconnected
@@ -1005,6 +1051,13 @@ final class SocketIOService: NSObject, @unchecked Sendable, URLSessionWebSocketD
 
         connectionState = .reconnecting(attempt: reconnectAttempt)
 
+        // If the app is backgrounded, don't schedule a timer that won't fire reliably.
+        // resetBackoffAndReconnect() will connect immediately when foreground returns.
+        if isAppInBackground {
+            logger.info("App in background — deferring reconnect until foreground")
+            return
+        }
+
         let jitter = Double.random(in: 0...0.5)
         let delay = min(
             baseReconnectDelay * pow(2.0, Double(min(reconnectAttempt - 1, 5))) + jitter,
@@ -1014,7 +1067,8 @@ final class SocketIOService: NSObject, @unchecked Sendable, URLSessionWebSocketD
         logger.info("Scheduling reconnect in \(String(format: "%.1f", delay))s (attempt \(self.reconnectAttempt)/\(self.maxReconnectAttempts))")
 
         DispatchQueue.main.async { [weak self] in
-            self?.reconnectTimer = Timer.scheduledTimer(
+            guard let self, self.autoReconnectEnabled, !self.isConnected, !self.isConnecting else { return }
+            self.reconnectTimer = Timer.scheduledTimer(
                 withTimeInterval: delay,
                 repeats: false
             ) { [weak self] _ in
