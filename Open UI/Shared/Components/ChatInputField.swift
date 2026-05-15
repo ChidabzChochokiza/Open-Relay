@@ -138,6 +138,12 @@ struct ChatInputField: View {
     /// Optional custom photo picker view (SwiftUI PhotosPicker).
     var photoPicker: AnyView?
 
+    // Message queue bindings
+    var messageQueue: [QueuedMessage] = []
+    var onQueueSendNow: ((UUID) -> Void)? = nil
+    var onQueueEdit: ((UUID) -> Void)? = nil
+    var onQueueDelete: ((UUID) -> Void)? = nil
+
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityScale) private var accessibilityScale
     @FocusState private var isFocused: Bool
@@ -202,6 +208,22 @@ struct ChatInputField: View {
             } else {
                 // Normal composer
                 VStack(spacing: 0) {
+                    // Message queue strip
+                    if !messageQueue.isEmpty {
+                        MessageQueueView(
+                            queue: messageQueue,
+                            onSendNow: { id in onQueueSendNow?(id) },
+                            onEdit: { id in onQueueEdit?(id) },
+                            onDelete: { id in onQueueDelete?(id) }
+                        )
+                        .padding(.horizontal, Spacing.screenPadding)
+                        .padding(.bottom, Spacing.xs)
+                        .transition(.asymmetric(
+                            insertion: .move(edge: .bottom).combined(with: .opacity),
+                            removal: .opacity
+                        ))
+                    }
+
                     // Attachment previews
                     if !attachments.isEmpty {
                         attachmentStrip
@@ -583,7 +605,7 @@ struct ChatInputField: View {
 
     private var trailingButton: some View {
         Group {
-            if onStopGenerating != nil && !isEnabled {
+            if onStopGenerating != nil {
                 // Stop generating
                 Button {
                     Haptics.play(.light)

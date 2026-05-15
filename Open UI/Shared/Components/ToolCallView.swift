@@ -1138,6 +1138,9 @@ struct RichUIEmbedView: View {
     /// Starts at 1 so the webview renders at minimal size until the embed
     /// reports its own height via postMessage or the didFinish fallback fires.
     @State private var webViewHeight: CGFloat = 1
+    /// Closure set by RichUIWebView once its coordinator is ready.
+    /// Calling it triggers a WKWebView snapshot + share sheet.
+    @State private var snapshotTrigger: (() -> Void)? = nil
     @Environment(\.colorScheme) private var colorScheme
 
     /// Maximum height before the embed gets internal scroll.
@@ -1148,11 +1151,29 @@ struct RichUIEmbedView: View {
         RichUIWebView(
             html: instrumentedHTML,
             height: $webViewHeight,
+            snapshotTrigger: $snapshotTrigger,
             authToken: authToken,
             serverBaseURL: serverBaseURL
         )
         .frame(height: min(max(webViewHeight, 1), maxHeight))
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(alignment: .topTrailing) {
+            // Share / save button — lets the user share the embed as an image
+            // (useful for QR codes, charts, etc. that have no built-in download)
+            if snapshotTrigger != nil {
+                Button {
+                    snapshotTrigger?()
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(7)
+                        .background(.ultraThinMaterial, in: Circle())
+                }
+                .padding(8)
+                .transition(.opacity.combined(with: .scale(scale: 0.8)))
+            }
+        }
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
@@ -1440,6 +1461,9 @@ private let richUILog = Logger(subsystem: "com.openui", category: "RichUIWebView
 private struct RichUIWebView: UIViewRepresentable {
     let html: String
     @Binding var height: CGFloat
+    /// When non-nil, calling this closure triggers a webview snapshot + share sheet.
+    /// Set by makeUIView so the parent SwiftUI view can drive it via a @State closure.
+    @Binding var snapshotTrigger: (() -> Void)?
     /// Auth JWT token injected into localStorage so the embed's authFetch()
     /// can authenticate `/api/` calls. Nil when no token is available.
     var authToken: String? = nil
@@ -1509,6 +1533,16 @@ private struct RichUIWebView: UIViewRepresentable {
 
         richUILog.debug("makeUIView: loading HTML (\(html.count) bytes), baseURL=\(serverBaseURL ?? "nil")")
         webView.loadHTMLString(html, baseURL: resolvedBaseURL)
+
+        // Expose the snapshot trigger to the parent SwiftUI view.
+        // We set it after creating the coordinator so the closure captures
+        // the coordinator (and its weak webView reference) correctly.
+        DispatchQueue.main.async {
+            self.snapshotTrigger = { [weak coord = context.coordinator] in
+                coord?.takeSnapshot()
+            }
+        }
+
         return webView
     }
 
@@ -1911,7 +1945,54 @@ private struct RichUIWebView: UIViewRepresentable {
             return fallback
         }
 
+        // MARK: - Snapshot (native share button)
+
+        /// Takes a WKWebView snapshot and presents the iOS share sheet with the resulting image.
+        /// Called when the user taps the share button overlay on the embed.
+        func takeSnapshot() {
+            guard let webView else {
+                richUILog.error("takeSnapshot: webView is nil")
+                return
+            }
+            let config = WKSnapshotConfiguration()
+            webView.takeSnapshot(with: config) { [weak self] image, error in
+                guard let self else { return }
+                if let error {
+                    richUILog.error("takeSnapshot: failed — \(error.localizedDescription)")
+                    return
+                }
+                guard let image else {
+                    richUILog.error("takeSnapshot: image is nil")
+                    return
+                }
+                richUILog.debug("takeSnapshot: success, size=\(image.size.width)x\(image.size.height)")
+                DispatchQueue.main.async { self.presentShareSheet(for: image) }
+            }
+        }
+
         // MARK: - Share Sheet
+
+        private func presentShareSheet(for image: UIImage) {
+            richUILog.debug("presentShareSheet(image): size=\(image.size.width)x\(image.size.height)")
+            guard let scene = UIApplication.shared.connectedScenes
+                .compactMap({ $0 as? UIWindowScene })
+                .first(where: { $0.activationState == .foregroundActive }),
+                  let rootVC = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController else {
+                richUILog.error("presentShareSheet(image): no key window / rootViewController found")
+                return
+            }
+            var topVC = rootVC
+            while let presented = topVC.presentedViewController { topVC = presented }
+            let activityVC = UIActivityViewController(activityItems: [image], applicationActivities: nil)
+            if let popover = activityVC.popoverPresentationController {
+                popover.sourceView = topVC.view
+                popover.sourceRect = CGRect(x: topVC.view.bounds.midX, y: topVC.view.bounds.midY, width: 0, height: 0)
+                popover.permittedArrowDirections = []
+            }
+            topVC.present(activityVC, animated: true) {
+                richUILog.debug("presentShareSheet(image): share sheet presented")
+            }
+        }
 
         private func presentShareSheet(for fileURL: URL) {
             richUILog.debug("presentShareSheet: \(fileURL.lastPathComponent)")

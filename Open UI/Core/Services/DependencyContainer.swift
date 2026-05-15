@@ -59,6 +59,11 @@ final class ActiveChatStore {
     /// always fetches a fresh value.
     var cachedMemorySetting: Bool? = nil
 
+    /// Session-level cache for the user's message queue setting (`ui.enableMessageQueue`).
+    /// Populated by the first ChatViewModel that fetches user settings.
+    /// Cleared on logout/server switch.
+    var cachedMessageQueueSetting: Bool? = nil
+
     /// Session-level cache for pinned model IDs from `ui.pinnedModels`.
     /// Populated by the first ChatViewModel that fetches user settings,
     /// then reused by all subsequent VMs. Cleared on logout/server switch.
@@ -152,6 +157,7 @@ final class ActiveChatStore {
         cachedModels = []
         cachedSelectedModelId = nil
         cachedMemorySetting = nil
+        cachedMessageQueueSetting = nil
         cachedPinnedModelIds = nil
         cachedUserName = nil
         cachedUserEmail = nil

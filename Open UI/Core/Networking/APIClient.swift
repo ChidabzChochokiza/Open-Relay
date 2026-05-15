@@ -4325,35 +4325,6 @@ final class APIClient: @unchecked Sendable {
         return nil
     }
 
-    func generateEmoji(model: String, prompt: String) async throws -> String? {
-        let body: [String: Any] = [
-            "model": model,
-            "prompt": prompt,
-            "stream": false
-        ]
-
-        let json = try await network.requestJSON(
-            path: "/api/v1/tasks/emoji/completions",
-            method: .post,
-            body: body,
-            timeout: 10
-        )
-
-        if let choices = json["choices"] as? [[String: Any]],
-           let first = choices.first,
-           let message = first["message"] as? [String: Any],
-           let content = message["content"] as? String,
-           !content.isEmpty {
-            return content.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        if let content = json["content"] as? String, !content.isEmpty {
-            return content.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        return nil
-    }
-
     func getArchivedChats(
         page: Int = 1,
         query: String? = nil,

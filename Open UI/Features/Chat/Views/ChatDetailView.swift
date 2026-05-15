@@ -732,7 +732,7 @@ struct ChatDetailView: View {
                 text: $vm.inputText,
                 attachments: $vm.attachments,
                 placeholder: placeholderText,
-                isEnabled: !vm.isStreaming,
+                isEnabled: !vm.isStreaming || vm.enableMessageQueue,
                 onSend: { Task { await viewModel.sendMessage() } },
                 onStopGenerating: vm.isStreaming ? { viewModel.stopStreaming() } : nil,
                 webSearchEnabled: $vm.webSearchEnabled,
@@ -864,7 +864,11 @@ struct ChatDetailView: View {
                 },
                 onOpenToolUserValves: { id, isFunction in
                     toolUserValvesKind = isFunction ? .function(id) : .tool(id)
-                }
+                },
+                messageQueue: vm.messageQueue,
+                onQueueSendNow: { id in viewModel.sendQueuedMessageNow(id: id) },
+                onQueueEdit: { id in viewModel.editQueuedMessage(id: id) },
+                onQueueDelete: { id in viewModel.deleteQueuedMessage(id: id) }
             )
         }
         .background(theme.background)

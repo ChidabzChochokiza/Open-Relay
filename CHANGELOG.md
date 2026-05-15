@@ -1,5 +1,17 @@
 # Changelog
 
+## v4.4 — May 14, 2026
+
+### What's New
+- Added Message Queue — when enabled in Chat Settings, messages sent while the AI is responding are queued and sent automatically when the response finishes. Each queued message can be sent immediately, edited, or removed from the queue.
+
+### Improvements
+- Added a share button to inline Rich UI embeds.
+
+### Bug Fixes
+- Fixed double requests (false emoji generation) being sent on every request.
+
+
 ## v4.3 — May 13, 2026
 
 ### What's New

@@ -24,7 +24,6 @@
 		3890E28F2F9845C10011D505 /* MarkdownParser in Frameworks */ = {isa = PBXBuildFile; productRef = 3890E28E2F9845C10011D505 /* MarkdownParser */; };
 		3890E2912F9845C10011D505 /* MarkdownView in Frameworks */ = {isa = PBXBuildFile; productRef = 3890E2902F9845C10011D505 /* MarkdownView */; };
 		38AA00012FA9B00000MRMAID /* BeautifulMermaid in Frameworks */ = {isa = PBXBuildFile; productRef = 38AA00002FA9B00000MRMAID /* BeautifulMermaid */; };
-		38AA00042FA9B00000SVGDRW /* SwiftDraw in Frameworks */ = {isa = PBXBuildFile; productRef = 38AA00032FA9B00000SVGDRW /* SwiftDraw */; };
 		38AD615B2FAB1946007725CE /* MarkdownParser in Frameworks */ = {isa = PBXBuildFile; productRef = 38AD615A2FAB1946007725CE /* MarkdownParser */; };
 		38AD615D2FAB1946007725CE /* MarkdownView in Frameworks */ = {isa = PBXBuildFile; productRef = 38AD615C2FAB1946007725CE /* MarkdownView */; };
 		38B6DED52FA55DDC001924FB /* MarkdownParser in Frameworks */ = {isa = PBXBuildFile; productRef = 38B6DED42FA55DDC001924FB /* MarkdownParser */; };
@@ -134,7 +133,6 @@
 				388C02F92FB5131C0098FB4F /* MarkdownView in Frameworks */,
 				387CA40E2F882523000B5152 /* MarkdownParser in Frameworks */,
 				388C02EF2FB44BD60098FB4F /* MarkdownView in Frameworks */,
-				38AA00042FA9B00000SVGDRW /* SwiftDraw in Frameworks */,
 				388C02ED2FB44BD60098FB4F /* MarkdownParser in Frameworks */,
 				38FEA31A2FA2A18600A98F25 /* MLXAudioSTT in Frameworks */,
 			);
@@ -216,7 +214,6 @@
 			name = "Open UI";
 			packageProductDependencies = (
 				38AA00002FA9B00000MRMAID /* BeautifulMermaid */,
-				38AA00032FA9B00000SVGDRW /* SwiftDraw */,
 				38754A962F845BE60012CD28 /* ReactionContextMenu */,
 				387CA40D2F882523000B5152 /* MarkdownParser */,
 				387CA40F2F882523000B5152 /* MarkdownView */,
@@ -275,7 +272,6 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				38AA00022FA9B00000MRMAID /* XCRemoteSwiftPackageReference "beautiful-mermaid-swift" */,
-				38AA00052FA9B00000SVGDRW /* XCRemoteSwiftPackageReference "SwiftDraw" */,
 				38754A952F845BE60012CD28 /* XCRemoteSwiftPackageReference "ReactionContextMenu" */,
 				38FEA3162FA2A18600A98F25 /* XCRemoteSwiftPackageReference "mlx-audio-swift" */,
 				388C02FA2FB533F60098FB4F /* XCRemoteSwiftPackageReference "MarkdownView" */,
@@ -353,7 +349,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 4.3;
+				MARKETING_VERSION = 4.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.openui.openui.OpenUIWidget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -385,7 +381,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 4.3;
+				MARKETING_VERSION = 4.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.openui.openui.OpenUIWidget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -554,7 +550,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 4.3;
+				MARKETING_VERSION = 4.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.openui.openui;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -602,7 +598,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 4.3;
+				MARKETING_VERSION = 4.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.openui.openui;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -676,14 +672,6 @@
 				minimumVersion = 0.1.0;
 			};
 		};
-		38AA00052FA9B00000SVGDRW /* XCRemoteSwiftPackageReference "SwiftDraw" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/swhitty/SwiftDraw.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 0.17.0;
-			};
-		};
 		38FEA3162FA2A18600A98F25 /* XCRemoteSwiftPackageReference "mlx-audio-swift" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/Blaizzy/mlx-audio-swift.git";
@@ -754,11 +742,6 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 38AA00022FA9B00000MRMAID /* XCRemoteSwiftPackageReference "beautiful-mermaid-swift" */;
 			productName = BeautifulMermaid;
-		};
-		38AA00032FA9B00000SVGDRW /* SwiftDraw */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 38AA00052FA9B00000SVGDRW /* XCRemoteSwiftPackageReference "SwiftDraw" */;
-			productName = SwiftDraw;
 		};
 		38AD615A2FAB1946007725CE /* MarkdownParser */ = {
 			isa = XCSwiftPackageProductDependency;

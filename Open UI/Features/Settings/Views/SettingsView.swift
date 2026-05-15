@@ -505,6 +505,8 @@ struct ChatSettingsView: View {
     @AppStorage("quickPills") private var quickPillsData: String = ""
     @State private var availableTools: [ToolItem] = []
     @State private var isLoadingTools = false
+    @State private var enableMessageQueue: Bool = false
+    @State private var hasLoadedMessageQueueSetting = false
 
     /// Whether the server admin has enabled title generation globally.
     private var serverTitleGenEnabled: Bool {
@@ -537,6 +539,22 @@ struct ChatSettingsView: View {
                 Toggle("Send on Enter", isOn: $sendOnEnter)
                     .tint(theme.brandPrimary)
                 Text("When enabled, pressing Enter sends the message. When disabled, Enter creates a new line.")
+                    .scaledFont(size: 12, weight: .medium)
+                    .foregroundStyle(theme.textTertiary)
+                    .listRowSeparator(.hidden)
+                Toggle("Message Queue", isOn: $enableMessageQueue)
+                    .tint(theme.brandPrimary)
+                    .onChange(of: enableMessageQueue) { _, newValue in
+                        guard hasLoadedMessageQueueSetting else { return }
+                        NotificationCenter.default.post(
+                            name: .messageQueueSettingChanged,
+                            object: newValue
+                        )
+                        Task {
+                            try? await dependencies.apiClient?.mergeUserUISettings(["enableMessageQueue": newValue])
+                        }
+                    }
+                Text("When enabled, messages sent while the AI is responding are queued and sent automatically when the response finishes.")
                     .scaledFont(size: 12, weight: .medium)
                     .foregroundStyle(theme.textTertiary)
                     .listRowSeparator(.hidden)
@@ -637,6 +655,7 @@ struct ChatSettingsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task {
             await loadTools()
+            await loadMessageQueueSetting()
         }
     }
 
@@ -678,6 +697,18 @@ struct ChatSettingsView: View {
             availableTools = try await manager.fetchTools()
         } catch {}
         isLoadingTools = false
+    }
+
+    private func loadMessageQueueSetting() async {
+        guard let client = dependencies.apiClient else { return }
+        do {
+            let settings = try await client.getUserSettings()
+            if let ui = settings["ui"] as? [String: Any],
+               let value = ui["enableMessageQueue"] as? Bool {
+                enableMessageQueue = value
+            }
+        } catch {}
+        hasLoadedMessageQueueSetting = true
     }
 }
 
