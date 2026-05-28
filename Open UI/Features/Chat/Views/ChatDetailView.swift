@@ -1249,14 +1249,10 @@ struct ChatDetailView: View {
             // content slides in smoothly instead of snapping.
             let grew = newSize.width > oldContentHeight + 1
             if grew && viewModel.isStreaming && !isScrolledUp && !isLoadingMoreMessages {
-                let now = Date()
-                // Bug 4: Remove the withAnimation wrapper — overlapping 0.15 s animations
-                // launched every 0.2 s fight each other and produce pogo-stick stutter.
-                // defaultScrollAnchor(.bottom) + scrollTo(edge:) handles momentum natively.
-                if now.timeIntervalSince(_pumpRef.lastScrollTime) > 0.2 {
-                    _pumpRef.lastScrollTime = now
-                    scrollPosition.scrollTo(edge: .bottom)
-                }
+                // No throttle — scrollTo(edge:) is driven by the 60 Hz drain tick so
+                // it fires at most once per frame. Calling it every content-height change
+                // gives perfectly smooth scroll that tracks each new character reveal.
+                scrollPosition.scrollTo(edge: .bottom)
             }
         }
     }

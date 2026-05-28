@@ -46,6 +46,20 @@ struct AdminConnectionsView: View {
                 .presentationDragIndicator(.visible)
                 .presentationCornerRadius(24)
         }
+        // Manage Ollama Models Sheet
+        .sheet(
+            isPresented: Binding(
+                get: { viewModel.manageOllamaModelIndex != nil },
+                set: { if !$0 { viewModel.manageOllamaModelIndex = nil } }
+            )
+        ) {
+            if let idx = viewModel.manageOllamaModelIndex {
+                OllamaModelManagerSheet(urlIdx: idx, apiClient: dependencies.apiClient)
+                    .presentationDetents([.large])
+                    .presentationDragIndicator(.visible)
+                    .presentationCornerRadius(24)
+            }
+        }
         // Edit Ollama Connection Sheet
         .sheet(
             isPresented: Binding(
@@ -298,6 +312,18 @@ struct AdminConnectionsView: View {
                 .truncationMode(.middle)
 
             Spacer()
+
+            // Download icon (manage models)
+            Button {
+                viewModel.beginManageOllamaModels(at: conn.index)
+            } label: {
+                Image(systemName: "arrow.down.circle")
+                    .scaledFont(size: 15, weight: .medium)
+                    .foregroundStyle(theme.textTertiary)
+                    .frame(width: 32, height: 32)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
 
             // Gear icon (edit)
             Button {

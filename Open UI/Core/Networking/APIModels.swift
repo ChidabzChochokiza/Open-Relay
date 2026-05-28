@@ -2606,6 +2606,100 @@ struct UserIdsForm: Codable, Sendable {
     }
 }
 
+// MARK: - Ollama Model Management
+
+/// A single model entry from `GET /ollama/api/tags/{url_idx}`.
+struct OllamaModelTag: Codable, Identifiable, Sendable {
+    var id: String { name }
+    let name: String
+    let model: String?
+    let modifiedAt: String?
+    let size: Int64?
+    let digest: String?
+    let details: OllamaModelDetails?
+
+    enum CodingKeys: String, CodingKey {
+        case name, model, size, digest, details
+        case modifiedAt = "modified_at"
+    }
+}
+
+struct OllamaModelDetails: Codable, Sendable {
+    let format: String?
+    let family: String?
+    let families: [String]?
+    let parameterSize: String?
+    let quantizationLevel: String?
+
+    enum CodingKeys: String, CodingKey {
+        case format, family, families
+        case parameterSize       = "parameter_size"
+        case quantizationLevel   = "quantization_level"
+    }
+}
+
+/// Response from `GET /ollama/api/tags/{url_idx}`.
+struct OllamaTagsResponse: Codable, Sendable {
+    let models: [OllamaModelTag]
+}
+
+/// A single ndjson event emitted by pull / create streaming endpoints.
+struct OllamaProgressEvent: Codable, Sendable {
+    let status: String?
+    let digest: String?
+    let total: Int64?
+    let completed: Int64?
+    let error: String?
+
+    /// Progress fraction 0–1, or nil if not applicable.
+    var progress: Double? {
+        guard let total, let completed, total > 0 else { return nil }
+        return Double(completed) / Double(total)
+    }
+}
+
+/// Request body for pull / delete / unload: `{"name": "..."}`.
+struct OllamaModelNameForm: Codable, Sendable {
+    let name: String
+}
+
+/// Request body for `POST /ollama/api/create`.
+struct OllamaCreateModelForm: Codable, Sendable {
+    let model: String
+    let from: String?
+    let system: String?
+    let template: String?
+    let parameters: [String: String]?
+
+    enum CodingKeys: String, CodingKey {
+        case model, from, system, template, parameters
+    }
+}
+
+/// Request body for `POST /ollama/api/copy`.
+struct OllamaCopyModelForm: Codable, Sendable {
+    let source: String
+    let destination: String
+}
+
+// MARK: - Ollama Loaded Model (GET /ollama/api/ps)
+
+struct OllamaRunningModel: Codable, Identifiable, Sendable {
+    var id: String { name }
+    let name: String
+    let model: String?
+    let size: Int64?
+    let digest: String?
+
+    enum CodingKeys: String, CodingKey {
+        case name, model, size, digest
+    }
+}
+
+struct OllamaRunningModelsResponse: Codable, Sendable {
+    let models: [OllamaRunningModel]
+}
+
 /// Returns the MIME type for a given file extension.
 func mimeType(for fileName: String) -> String {
     let ext = (fileName as NSString).pathExtension.lowercased()

@@ -1,5 +1,10 @@
 # Changelog
 
+## v4.8 — May 28, 2026
+
+### What's New
+- Added "Manage Ollama" sheet — pull models from Ollama.com with real-time whole-model progress, update all installed models at once, delete models, create custom models from a modelfile, and upload local GGUF files directly to your Ollama server, all from within the app.
+
 ## v4.7.1 — May 28, 2026
 
 ### Improvements

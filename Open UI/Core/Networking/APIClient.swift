@@ -5669,6 +5669,119 @@ final class APIClient: @unchecked Sendable {
         return try decoder.decode(OllamaConfig.self, from: data)
     }
 
+    // MARK: - Ollama Model Management
+
+    /// GET `/ollama/api/tags/{urlIdx}`
+    func getOllamaTags(urlIdx: Int) async throws -> [OllamaModelTag] {
+        let (data, _) = try await network.requestRaw(path: "/ollama/api/tags/\(urlIdx)")
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let response = try decoder.decode(OllamaTagsResponse.self, from: data)
+        return response.models
+    }
+
+    /// DELETE `/ollama/api/delete/{urlIdx}`
+    func deleteOllamaModel(name: String, urlIdx: Int) async throws {
+        let body = try JSONSerialization.data(withJSONObject: ["name": name])
+        _ = try await network.requestRaw(
+            path: "/ollama/api/delete/\(urlIdx)",
+            method: .delete,
+            body: body,
+            contentType: "application/json"
+        )
+    }
+
+    /// POST `/ollama/api/pull/{urlIdx}` — streaming NDJSON
+    func streamOllamaPull(name: String, urlIdx: Int) -> AsyncThrowingStream<OllamaProgressEvent, Error> {
+        AsyncThrowingStream { continuation in
+            Task {
+                do {
+                    let body = try JSONSerialization.data(withJSONObject: ["name": name, "stream": true])
+                    var request = try network.buildRequest(
+                        path: "/ollama/api/pull/\(urlIdx)",
+                        method: .post,
+                        body: body,
+                        contentType: "application/json"
+                    )
+                    request.timeoutInterval = 600
+                    let session = network.session
+                    let (bytes, _) = try await session.bytes(for: request)
+                    for try await line in bytes.lines {
+                        guard !line.isEmpty else { continue }
+                        if let data = line.data(using: .utf8),
+                           let event = try? JSONDecoder().decode(OllamaProgressEvent.self, from: data) {
+                            continuation.yield(event)
+                            if event.error != nil { continuation.finish(throwing: URLError(.badServerResponse)); return }
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
+    }
+
+    /// POST `/ollama/api/create/{urlIdx}` — streaming NDJSON
+    func streamOllamaCreate(model: String, payload: [String: Any], urlIdx: Int) -> AsyncThrowingStream<OllamaProgressEvent, Error> {
+        AsyncThrowingStream { continuation in
+            Task {
+                do {
+                    var merged = payload
+                    merged["name"] = model
+                    merged["stream"] = true
+                    let body = try JSONSerialization.data(withJSONObject: merged)
+                    var request = try network.buildRequest(
+                        path: "/ollama/api/create/\(urlIdx)",
+                        method: .post,
+                        body: body,
+                        contentType: "application/json"
+                    )
+                    request.timeoutInterval = 600
+                    let session = network.session
+                    let (bytes, _) = try await session.bytes(for: request)
+                    for try await line in bytes.lines {
+                        let trimmed = line.trimmingCharacters(in: .whitespaces)
+                        guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8) else { continue }
+                        if let event = try? JSONDecoder().decode(OllamaProgressEvent.self, from: data) {
+                            continuation.yield(event)
+                            if event.status == "success" { break }
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
+    }
+
+    /// POST `/ollama/api/blobs/sha256:{digest}/{urlIdx}` — upload raw GGUF binary
+    /// Returns the sha256 digest string (without the "sha256:" prefix).
+    func uploadOllamaBlob(
+        fileURL: URL,
+        urlIdx: Int,
+        progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> String {
+        // Compute SHA-256 of file
+        let fileData = try Data(contentsOf: fileURL)
+        let digest = fileData.sha256HexString
+        var request = try network.buildRequest(
+            path: "/ollama/api/blobs/sha256:\(digest)/\(urlIdx)",
+            method: .post,
+            body: fileData,
+            contentType: "application/octet-stream"
+        )
+        request.timeoutInterval = 3600
+        // Upload with delegate-based progress
+        let (_, response) = try await network.session.upload(for: request, from: fileData)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
+        progress(1.0)
+        return digest
+    }
+
     // MARK: - Tool Servers Config
 
     /// GET `/api/v1/configs/tool_servers`

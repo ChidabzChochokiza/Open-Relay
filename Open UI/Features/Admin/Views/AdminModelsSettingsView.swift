@@ -15,6 +15,7 @@ struct AdminModelsSettingsView: View {
     @State private var importError: String? = nil
     @State private var editingModelDetail: ModelDetail? = nil
     @State private var isLoadingEditId: String? = nil
+    @State private var ollamaManagerURLIdx: Int? = nil
 
     var body: some View {
         ScrollView {
@@ -51,8 +52,24 @@ struct AdminModelsSettingsView: View {
         }
         // Manage Sheet
         .sheet(isPresented: $showManageSheet) {
-            AdminModelsManageSheet(viewModel: viewModel)
-                .presentationDetents([.medium, .large])
+            AdminModelsManageSheet(viewModel: viewModel) { idx in
+                // Dismiss manage sheet first, then present Ollama manager
+                showManageSheet = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    ollamaManagerURLIdx = idx
+                }
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .presentationCornerRadius(24)
+        }
+        // Ollama Model Manager Sheet (presented from top level to avoid nested-sheet issue)
+        .sheet(item: Binding(
+            get: { ollamaManagerURLIdx.map { OllamaURLIdxWrapper(idx: $0) } },
+            set: { ollamaManagerURLIdx = $0?.idx }
+        )) { wrapper in
+            OllamaModelManagerSheet(urlIdx: wrapper.idx, apiClient: dependencies.apiClient)
+                .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
                 .presentationCornerRadius(24)
         }
@@ -408,10 +425,21 @@ struct AdminModelsSettingsView: View {
 
 // MARK: - Manage Sheet
 
+// MARK: - Ollama URL Index Wrapper (Identifiable for sheet(item:))
+
+private struct OllamaURLIdxWrapper: Identifiable {
+    let idx: Int
+    var id: Int { idx }
+}
+
+// MARK: - AdminModelsManageSheet
+
 struct AdminModelsManageSheet: View {
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
+    @Environment(AppDependencyContainer.self) private var dependencies
     let viewModel: AdminModelsSettingsViewModel
+    var onManageOllama: (Int) -> Void = { _ in }
 
     var body: some View {
         NavigationStack {
@@ -440,36 +468,48 @@ struct AdminModelsManageSheet: View {
                 .foregroundStyle(theme.textTertiary)
                 .textCase(.uppercase)
 
-            VStack(spacing: 0) {
-                // URL selector
+            if viewModel.ollamaConfig.ollamaBaseURLs.isEmpty {
                 HStack {
-                    Text("URL")
+                    Image(systemName: "info.circle")
                         .scaledFont(size: 14)
-                        .foregroundStyle(theme.textSecondary)
-                    Spacer()
-                    if viewModel.ollamaConfig.ollamaBaseURLs.isEmpty {
-                        Text("No Ollama URLs configured")
-                            .scaledFont(size: 13)
-                            .foregroundStyle(theme.textTertiary)
-                    } else {
-                        Menu {
-                            ForEach(viewModel.ollamaConfig.ollamaBaseURLs, id: \.self) { url in
-                                Button(url) {}
+                        .foregroundStyle(theme.textTertiary)
+                    Text("No Ollama URLs configured. Add one in Admin → Connections.")
+                        .scaledFont(size: 13)
+                        .foregroundStyle(theme.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(Spacing.md)
+                .background(theme.surfaceContainer)
+                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous)
+                        .strokeBorder(theme.cardBorder, lineWidth: 0.5)
+                )
+            } else {
+                // One row per Ollama URL with a "Manage" button
+                VStack(spacing: 0) {
+                    ForEach(Array(viewModel.ollamaConfig.ollamaBaseURLs.enumerated()), id: \.offset) { idx, url in
+                        HStack {
+                            Text(url.isEmpty ? "(no URL)" : url)
+                                .scaledFont(size: 14)
+                                .foregroundStyle(theme.textPrimary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer()
+                            Button("Manage") {
+                                onManageOllama(idx)
                             }
-                        } label: {
-                            HStack(spacing: 4) {
-                                Text(viewModel.ollamaConfig.ollamaBaseURLs.first ?? "Select URL")
-                                    .scaledFont(size: 13)
-                                    .foregroundStyle(theme.textSecondary)
-                                    .lineLimit(1)
-                                Image(systemName: "chevron.up.chevron.down")
-                                    .scaledFont(size: 11)
-                                    .foregroundStyle(theme.textTertiary)
-                            }
+                            .scaledFont(size: 13, weight: .medium)
+                            .foregroundStyle(theme.brandPrimary)
+                            .buttonStyle(.plain)
+                        }
+                        .padding(Spacing.md)
+
+                        if idx < viewModel.ollamaConfig.ollamaBaseURLs.count - 1 {
+                            Divider().padding(.horizontal, Spacing.md)
                         }
                     }
                 }
-                .padding(Spacing.md)
                 .background(theme.surfaceContainer)
                 .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
                 .overlay(
@@ -489,11 +529,6 @@ struct AdminModelsManageSheet: View {
                 }
                 .padding(.top, 4)
             }
-
-            Text("Manage Ollama models by visiting your Ollama server's web interface, or use the Ollama CLI to pull/remove models.")
-                .scaledFont(size: 12)
-                .foregroundStyle(theme.textTertiary)
-                .padding(.top, 4)
         }
     }
 }

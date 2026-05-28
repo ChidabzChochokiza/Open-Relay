@@ -6,7 +6,7 @@ private let pipelineLog = Logger(subsystem: "com.openui", category: "StreamingPi
 // MARK: - Streaming Snapshot (main-thread readable output)
 
 /// Immutable snapshot published to the main thread every drain tick.
-/// All fields are pre-computed AND pre-sliced by the background actor —
+/// All fields are pre-computed and pre-sliced by the background actor —
 /// the main thread reads them without doing any O(N) string work.
 struct StreamingSnapshot: Sendable {
     /// Content currently visible to the user (typewriter-drained). Full string.
@@ -78,8 +78,7 @@ struct StreamingSnapshot: Sendable {
 ///
 /// ## Threading model
 /// - `append(_:)` / `finish()` / `abort()` — called from `@MainActor` callers
-///   via `Task { await pipeline.xxx() }`, i.e. always off the main thread by the
-///   time they execute inside the actor.
+///   via `Task { await pipeline.xxx() }`, always off the main thread inside the actor.
 /// - Internal drain timer fires on a dedicated background serial queue.
 /// - `publishSnapshot()` hops to `@MainActor` to write the snapshot.
 actor StreamingPipeline {
@@ -98,9 +97,6 @@ actor StreamingPipeline {
     /// The full accumulated server content (ground truth, append-only).
     private var buffer: String = ""
 
-    /// Character count of buffer at the last drain tick (used for burst detection).
-    private var lastKnownTotal: Int = 0
-
     // MARK: - Display cursor
 
     /// How many characters of `buffer` have been revealed to the user.
@@ -111,29 +107,35 @@ actor StreamingPipeline {
     private var drainAccumulator: Double = 0
     private var isFinishing: Bool = false
 
-    // MARK: Target-latency drain constants
+    // MARK: - Dynamic drain constants
     //
-    // The typewriter reveals content such that the displayed text lags behind
-    // the server buffer by ~targetLatencyFrames. Each tick the rate auto-adapts:
-    //   rate = buffered / targetLatencyFrames
-    // This guarantees continuous motion — no pauses, no dumps.
+    // The typewriter reveals content so that displayed text lags behind the server
+    // buffer by ~dynamicLatencyFrames. This adapts to model speed each tick:
+    //
+    //   • Slow model (few chars/frame arriving): higher latency → smooth trickle
+    //   • Fast model (many chars/frame arriving): lower latency → near-instant reveal
+    //
+    // Because MarkdownView only receives the short live tail (not the full string),
+    // there is no longer any rendering concern at high reveal rates. The goal is
+    // simply to keep the typewriter effect perceptible while not making the user
+    // wait for content that is already fully available on the server.
 
-    /// How many frames of content should remain buffered (visual lag).
-    /// 24 frames ≈ 400ms at 60Hz — a comfortable, perceptible typewriter effect.
-    private let targetLatencyFrames: Double = 24
+    /// Target drain latency in frames. At 60 Hz ≈ 133 ms of lag.
+    /// Keeps a short but perceptible typewriter effect on fast models.
+    private let targetLatencyFrames: Double = 8
 
-    /// Shorter latency used when the server has finished sending (drain remaining
-    /// buffer faster so the user isn't waiting unnecessarily).
-    private let finishingLatencyFrames: Double = 10
+    /// Shorter latency used once the server has finished sending.
+    /// Drains any remaining buffer quickly so the user isn't waiting.
+    private let finishingLatencyFrames: Double = 6
 
     /// Minimum chars/frame floor — ensures at least a trickle even with tiny buffers.
     private let minRatePerFrame: Double = 0.3
 
-    /// Maximum chars/frame cap — prevents overwhelming MarkdownView on fast models.
-    private let maxRatePerFrame: Double = 7.0
+    /// Maximum chars/frame cap
+    private let maxRatePerFrame: Double = 15.0
 
     /// Perceptual keep-back: reserve this many chars so the drain never fully
-    /// empties the buffer mid-stream (avoids visual "catch-up then pause" stutter).
+    /// empties the buffer mid-stream (avoids the "catch-up then pause" stutter).
     /// Disabled when isFinishing (we want to drain to zero).
     private let tailReserve: Int = 2
 
@@ -147,22 +149,16 @@ actor StreamingPipeline {
     //
     // frozenContent / liveTailFrozenProse / pureFrozenProse only change when their
     // respective boundary offset advances. By storing the last computed String and
-    // the offset it was built from, we can hand the *same* String instance to the
+    // the offset it was built from, we hand the *same* String instance to the
     // snapshot when the boundary hasn't moved. Swift String == fast-paths to true
     // instantly when both sides share the same internal buffer (COW pointer equality),
     // so AssistantMessageContent.ParseCache skips its O(N) reparse on stable ticks.
-    //
-    // `splitIdx` stores the String.Index used to produce the cached slice.
-    // On a cache hit the boundary hasn't moved, so `displayContent` has only grown
-    // by appending — the stored index is still valid. Reusing it eliminates the
-    // repeated `displayContent.index(startIndex, offsetBy: N)` call, which is O(N)
-    // and was previously paid on every tick even when the boundary didn't advance.
 
-    private var _cachedFrozenContent: (offset: Int, value: String, splitIdx: String.Index?) = (0, "", nil)
-    private var _cachedLiveTailFrozenProse: (offset: Int, value: String, splitIdx: String.Index?) = (0, "", nil)
-    private var _cachedPureFrozenProse: (offset: Int, value: String, splitIdx: String.Index?) = (0, "", nil)
+    private var _cachedFrozenContent: (offset: Int, value: String) = (0, "")
+    private var _cachedLiveTailFrozenProse: (offset: Int, value: String) = (0, "")
+    private var _cachedPureFrozenProse: (offset: Int, value: String) = (0, "")
 
-    // MARK: - Flags cache (keyed by buffer.utf8.count — fast O(1) after first calc)
+    // MARK: - Flags cache (keyed by buffer.utf8.count — O(1) after first calc)
 
     private struct ToolCallBlockFlags {
         let hasUnclosed: Bool
@@ -170,8 +166,7 @@ actor StreamingPipeline {
     }
     private var _toolCallFlagsCache: (contentCount: Int, flags: ToolCallBlockFlags)?
     private var _reasoningFlagsCache: (contentCount: Int, hasClosed: Bool)?
-    /// Cached result of `hasOpenLivePreviewFence`. Keyed by utf8.count so it
-    /// costs O(1) on every tick after the first scan for a given buffer length.
+    /// Cached result of `hasOpenLivePreviewFence`, keyed by utf8.count.
     private var _livePreviewFenceCache: (contentCount: Int, hasOpen: Bool)?
 
     // MARK: - Drain timer
@@ -207,7 +202,6 @@ actor StreamingPipeline {
         let result = buffer
         stopTimer()
         resetState()
-        // Publish idle snapshot
         Task { @MainActor [onSnapshot] in onSnapshot(.idle) }
         return result
     }
@@ -216,7 +210,6 @@ actor StreamingPipeline {
 
     private func resetState() {
         buffer = ""
-        lastKnownTotal = 0
         displayedCount = 0
         drainAccumulator = 0
         isFinishing = false
@@ -226,9 +219,9 @@ actor StreamingPipeline {
         _toolCallFlagsCache = nil
         _reasoningFlagsCache = nil
         _livePreviewFenceCache = nil
-        _cachedFrozenContent = (0, "", nil)
-        _cachedLiveTailFrozenProse = (0, "", nil)
-        _cachedPureFrozenProse = (0, "", nil)
+        _cachedFrozenContent = (0, "")
+        _cachedLiveTailFrozenProse = (0, "")
+        _cachedPureFrozenProse = (0, "")
     }
 
     // MARK: - Timer management
@@ -236,14 +229,10 @@ actor StreamingPipeline {
     private func startTimer() {
         stopTimer()
         let timer = DispatchSource.makeTimerSource(queue: Self.timerQueue)
-        // 60 Hz — 16.6ms interval, 0 leeway for minimal jitter.
-        // No startup delay needed: the target-latency algorithm naturally produces
-        // a very low rate on the first tick (buffer is tiny), preventing any burst.
+        // 60 Hz — 16.6 ms interval, 1 ms leeway for minimal jitter.
         timer.schedule(deadline: .now(), repeating: .milliseconds(16), leeway: .milliseconds(1))
         timer.setEventHandler { [weak self] in
             guard let self else { return }
-            // DispatchSource event handlers are NOT actor-isolated — we need to
-            // hop into the actor to safely access mutable state.
             Task { await self.drainTick() }
         }
         timer.resume()
@@ -260,24 +249,19 @@ actor StreamingPipeline {
     private func drainTick() {
         let full = buffer
 
-        // Finish-exit: only pay O(N) full.count when isFinishing — zero cost on
-        // normal streaming ticks. Character count (not utf8.count) is compared
-        // against displayedCount since both are in Swift character units.
+        // Finish-exit: drain to zero when the server is done.
         if isFinishing && full.count == displayedCount {
             stopTimer()
             Task { @MainActor [onSnapshot] in onSnapshot(.idle) }
             return
         }
 
-        // ── Tool call fast-forward ────────────────────────────────────────────
-        // While an unclosed tool_calls block is in-flight we hold the drain
-        // cursor so the user never sees partial HTML. When the server finishes
-        // (isFinishing) we fall through to the normal drain so the accumulated
-        // content is still revealed — stopping cold would leave the response
-        // visually empty even though the full text has been received.
+        // ── Tool call freeze ──────────────────────────────────────────────────
+        // Hold the drain cursor while an unclosed tool_calls block is in-flight
+        // so the user never sees partial HTML. Fall through when isFinishing so
+        // content isn't left invisible if the server completes without closing.
         if toolCallFlags(for: full).hasUnclosed {
             if !isFinishing { return }
-            // isFinishing: skip the freeze and let the drain run normally below.
         }
 
         // ── Closed reasoning fast-forward ─────────────────────────────────────
@@ -285,10 +269,7 @@ actor StreamingPipeline {
             if let lastEnd = Self.lastReasoningDetailsEnd(in: full), displayedCount < lastEnd {
                 let endIdx = full.index(full.startIndex, offsetBy: lastEnd)
                 displayedCount = lastEnd
-                if frozenReasoningBoundaryOffset != lastEnd {
-                    frozenReasoningBoundaryOffset = lastEnd
-                }
-                lastKnownTotal = full.count
+                frozenReasoningBoundaryOffset = lastEnd
                 drainAccumulator = 0
                 publishSnapshot(displayContent: String(full[..<endIdx]))
                 return
@@ -300,10 +281,7 @@ actor StreamingPipeline {
             if let lastEnd = Self.lastToolCallDetailsEnd(in: full), displayedCount < lastEnd {
                 let endIdx = full.index(full.startIndex, offsetBy: lastEnd)
                 displayedCount = lastEnd
-                if frozenToolBoundaryOffset != lastEnd {
-                    frozenToolBoundaryOffset = lastEnd
-                }
-                lastKnownTotal = full.count
+                frozenToolBoundaryOffset = lastEnd
                 drainAccumulator = 0
                 publishSnapshot(displayContent: String(full[..<endIdx]))
                 return
@@ -311,33 +289,37 @@ actor StreamingPipeline {
         }
 
         // ── Target-latency drain ──────────────────────────────────────────────
-        // Each tick, compute a rate that will empty the buffer in exactly
-        // `targetLatencyFrames` frames. This adapts instantly to any model speed:
-        //   • Slow model (tiny buffer): rate is low → smooth trickle
-        //   • Fast model (large buffer): rate is high → keeps up without lag
-        //   • Server pauses: buffer empties → rate hits floor → minimal motion
-        //   • Server finishes: shorter latency drains remaining buffer faster
+        //
+        // Drain formula: rate = buffered / targetLatencyFrames
+        //
+        // This keeps the typewriter ~133ms behind the server buffer on any model.
+        // Fast models get a near-instant reveal; slow models get smooth trickle.
+        // maxRatePerFrame prevents the drain from jumping too far in a single tick
+        // on very large batches.
+        //
+        // Because MarkdownView only receives the short live tail (not the full
+        // accumulated string), there is no rendering performance concern at high
+        // reveal rates — the renderer handles the small delta cheaply.
+
         let fullCount = full.count   // O(N) — paid once, after all early-return branches
         let currentBuffered = fullCount - displayedCount
 
-        // Apply tail-reserve: don't drain the last few chars while still streaming.
-        // This ensures the reveal never "catches up" to zero and pauses.
-        let effectiveBuffered: Int
-        if isFinishing {
-            effectiveBuffered = currentBuffered
-        } else {
-            effectiveBuffered = max(0, currentBuffered - tailReserve)
-        }
+        // Keep-back: reserve a couple chars while streaming to prevent the cursor
+        // catching up to zero and stalling when the server briefly pauses.
+        let effectiveBuffered = isFinishing ? currentBuffered : max(0, currentBuffered - tailReserve)
         guard effectiveBuffered > 0 else { return }
 
         let latency = isFinishing ? finishingLatencyFrames : targetLatencyFrames
-        let rate = Double(effectiveBuffered) / latency
-        // Live-preview code fences (html/svg/mermaid/chart) are rendered by a WKWebView
-        // that handles progressive display itself — the typewriter rate cap is irrelevant
-        // and only causes a 36-second delay for a 600-line HTML file. Fast-drain these
-        // blocks at 500 chars/frame so the WebView receives content almost immediately.
-        let effectiveMaxRate = hasOpenLivePreviewFence(in: full) ? 500.0 : maxRatePerFrame
-        let charsThisFrame = min(max(rate, minRatePerFrame), effectiveMaxRate)
+        let baseRate = Double(effectiveBuffered) / latency
+        let charsThisFrame: Double
+
+        // Live-preview code fences (html/svg/mermaid/chart) are rendered by a
+        // WKWebView — fast-drain these so the WebView receives content quickly.
+        if hasOpenLivePreviewFence(in: full) {
+            charsThisFrame = max(baseRate, 500.0)
+        } else {
+            charsThisFrame = min(max(baseRate, minRatePerFrame), maxRatePerFrame)
+        }
 
         drainAccumulator += charsThisFrame
         let reveal = min(Int(drainAccumulator), currentBuffered)
@@ -350,7 +332,6 @@ actor StreamingPipeline {
         let newDisplayContent = String(full[..<endIdx])
 
         // ── Paragraph boundary (prose freeze) ────────────────────────────────
-        lastKnownTotal = fullCount  // keep in sync for fast-forward branches that read it
         let effectiveFrozen = max(frozenToolBoundaryOffset, frozenReasoningBoundaryOffset)
         updateProseBoundary(in: newDisplayContent, effectiveFrozen: effectiveFrozen)
 
@@ -380,13 +361,10 @@ actor StreamingPipeline {
         }
     }
 
-
-
     // MARK: - Publish (hops to @MainActor)
 
     /// Builds the snapshot with all pre-sliced strings (off-main), then delivers to @MainActor.
     private func publishSnapshot(displayContent: String) {
-        // ── Compute frozen/live split ─────────────────────────────────────────
         let fb = max(frozenToolBoundaryOffset, frozenReasoningBoundaryOffset)
         let prose = frozenProseBoundaryOffset
         let dcCount = displayContent.count
@@ -401,47 +379,29 @@ actor StreamingPipeline {
 
         if fb > 0 && dcCount >= fb {
             // Tool/reasoning split — frozenContent is stable once fb stops advancing.
-            // Reuse cached String instance (preserves COW pointer → downstream == is O(1)).
+            // Cache the String value so downstream == is O(1) on stable ticks.
             //
-            // NOTE: displayContent is a NEW String allocation every drain tick
-            // (built as String(full[..<endIdx]) in drainTick). A String.Index from
-            // a previous tick's displayContent is INVALID on the current one — using
-            // it causes a fatal range error / bad access crash. We therefore NEVER
-            // store or reuse a String.Index across ticks. Only the String VALUE of
-            // frozenContent is cached; the split index is always recomputed fresh.
+            // NOTE: displayContent is a new String allocation every drain tick.
+            // Never store or reuse a String.Index across ticks — always recompute fresh.
             let fbIdx = displayContent.index(displayContent.startIndex, offsetBy: fb)
             if _cachedFrozenContent.offset == fb {
-                // Cache hit: reuse stored frozenContent String value (COW-stable).
                 frozenContent = _cachedFrozenContent.value
             } else {
-                // Cache miss: compute and store the frozen content slice.
                 frozenContent = String(displayContent[..<fbIdx])
-                _cachedFrozenContent = (fb, frozenContent, nil)
+                _cachedFrozenContent = (fb, frozenContent)
             }
-            // liveTail grows every tick — always a fresh slice using the fresh fbIdx.
             liveTail = String(displayContent[fbIdx...])
 
             // Further split liveTail at prose boundary.
-            // liveTailFrozenProse (the stable portion) is cached by prose offset.
-            // NOTE: liveTail is a FRESH String allocation on every tick (it's built as
-            // String(displayContent[fbIdx...]) above). This means a String.Index from
-            // a previous tick's liveTail is NOT valid against the current tick's liveTail —
-            // using it would be undefined behaviour and cause fatal range errors / bad access.
-            // We therefore cache only the String VALUE of liveTailFrozenProse (which is
-            // stable once prose stops advancing) and always recompute the split index
-            // from liveTail.startIndex. O(relP) where relP is tiny (live tail is short).
             if prose > fb {
                 let relP = prose - fb
                 if liveTail.count >= relP {
-                    // Always compute a fresh index against the CURRENT liveTail.
                     let splitIdx = liveTail.index(liveTail.startIndex, offsetBy: relP)
                     if _cachedLiveTailFrozenProse.offset == prose {
-                        // Cache hit: reuse stored liveTailFrozenProse String value (COW-stable).
                         liveTailFrozenProse = _cachedLiveTailFrozenProse.value
                     } else {
-                        // Cache miss: compute and store the frozen prose slice.
                         liveTailFrozenProse = String(liveTail[..<splitIdx])
-                        _cachedLiveTailFrozenProse = (prose, liveTailFrozenProse, nil)
+                        _cachedLiveTailFrozenProse = (prose, liveTailFrozenProse)
                     }
                     liveTailLiveProse = String(liveTail[splitIdx...])
                     relProse = relP
@@ -449,21 +409,12 @@ actor StreamingPipeline {
             }
         } else if fb == 0 && prose > 0 && dcCount >= prose {
             // Pure-prose split (no tool/reasoning blocks).
-            // pureFrozenProse is stable once prose stops advancing — cache it.
-            //
-            // NOTE: displayContent is a NEW String allocation every drain tick.
-            // A String.Index from a previous tick's displayContent is INVALID on
-            // the current one — reusing it causes a fatal range error / bad access.
-            // We therefore NEVER store or reuse a String.Index across ticks.
-            // Only the String VALUE is cached; the split index is always fresh.
             let splitIdx = displayContent.index(displayContent.startIndex, offsetBy: prose)
             if _cachedPureFrozenProse.offset == prose {
-                // Cache hit: reuse stored pureFrozenProse String value (COW-stable).
                 pureFrozenProse = _cachedPureFrozenProse.value
             } else {
-                // Cache miss: compute and store the frozen prose slice.
                 pureFrozenProse = String(displayContent[..<splitIdx])
-                _cachedPureFrozenProse = (prose, pureFrozenProse, nil)
+                _cachedPureFrozenProse = (prose, pureFrozenProse)
             }
             pureLiveProse = String(displayContent[splitIdx...])
         }
@@ -490,9 +441,7 @@ actor StreamingPipeline {
 
     /// Returns `true` when `content` contains an unclosed live-preview code fence
     /// (` ```html `, ` ```svg `, ` ```mermaid `, ` ```chart* `).
-    ///
     /// Result is cached by utf8.count — O(1) on repeat calls for the same buffer length.
-    /// O(N) scan only fires when new content has been appended.
     private func hasOpenLivePreviewFence(in content: String) -> Bool {
         let count = content.utf8.count
         if let cached = _livePreviewFenceCache, cached.contentCount == count {
@@ -503,18 +452,15 @@ actor StreamingPipeline {
                       "```highcharts\n", "```plotly\n",
                       "```vega-lite\n", "```vegalite\n"]
         var result = false
-        // Case-insensitive scan using lowercased copy (avoids repeated ICU calls).
         let lower = content.lowercased()
         for fence in fences {
             guard let openRange = lower.range(of: fence) else { continue }
-            // If no closing fence follows, the block is still open.
             if lower[openRange.upperBound...].range(of: "\n```") == nil {
                 result = true
                 break
             }
         }
-        // VIZ blocks (@@@VIZ-START…@@@VIZ-END) are also large HTML payloads —
-        // drain at 500 chars/frame so InlineVisualizerView receives content fast.
+        // VIZ blocks (@@@VIZ-START…@@@VIZ-END) are large HTML payloads — fast-drain.
         if !result && content.contains("@@@VIZ-START") && !content.contains("\n@@@VIZ-END") {
             result = true
         }
@@ -684,9 +630,8 @@ actor StreamingPipeline {
             fenceCount += 1; cur = r.upperBound
         }
         guard fenceCount % 2 == 0 else { return 0 }
-        // Don't freeze a boundary inside an open VIZ block — doing so would split
-        // @@@VIZ-START…content across pureFrozenProse/pureLiveProse, causing the
-        // live tail to lose the marker and InlineVisualizerView to never appear.
+        // Don't freeze a boundary inside an open VIZ block — the marker must stay
+        // together in pureLiveProse so InlineVisualizerView can detect it.
         let hasUnclosedViz = textBefore.contains("@@@VIZ-START") && !textBefore.contains("\n@@@VIZ-END")
         guard !hasUnclosedViz else { return 0 }
         return text.distance(from: text.startIndex, to: boundaryIdx)

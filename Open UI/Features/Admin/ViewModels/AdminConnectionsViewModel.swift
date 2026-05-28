@@ -105,6 +105,15 @@ final class AdminConnectionsViewModel {
     // Saving state
     var isSavingAddOpenAI = false
 
+    // MARK: - Manage Ollama Models Sheet
+
+    /// Index of the Ollama connection to manage models for (nil = not showing)
+    var manageOllamaModelIndex: Int?
+
+    func beginManageOllamaModels(at index: Int) {
+        manageOllamaModelIndex = index
+    }
+
     // MARK: - Edit Sheet State (Ollama)
 
     /// Index of the Ollama connection being edited (nil = not editing)
