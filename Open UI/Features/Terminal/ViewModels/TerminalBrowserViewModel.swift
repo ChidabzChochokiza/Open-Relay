@@ -70,6 +70,12 @@ final class TerminalBrowserViewModel {
     // Prevents the receive-loop error path from triggering auto-reconnect.
     private var intentionalDisconnect: Bool = false
 
+    // Set to true the first time any data arrives on the current WS connection.
+    // If the receive loop errors before this is set, the server-side PTY session
+    // is likely dead and we should fall back to a brand-new session instead of
+    // retrying the same stale session ID.
+    private var wsSessionReceivedData: Bool = false
+
     // True while the terminal panel is visible — used to gate auto-reconnect
     // so we don't reconnect when the panel is closed.
     private var isPanelOpen: Bool = false
@@ -427,6 +433,9 @@ final class TerminalBrowserViewModel {
         sendTextFrame(["type": "resize", "cols": terminalCols, "rows": terminalRows])
 
         // Start receive loop and ping timer
+        // Reset the "data received" sentinel for this new connection.
+        wsSessionReceivedData = false
+
         wsReceiveTask = Task { await receiveLoop() }
         wsPingTask = Task { await pingLoop() }
 
@@ -507,6 +516,8 @@ final class TerminalBrowserViewModel {
 
             do {
                 let message = try await wsTask.receive()
+                // Mark that the server has acknowledged this session and sent real data.
+                wsSessionReceivedData = true
                 switch message {
                 case .data(let data):
                     // Raw PTY output — feed directly to SwiftTerm
@@ -525,7 +536,7 @@ final class TerminalBrowserViewModel {
                 // Only treat as unexpected if we didn't intentionally close things
                 if intentionalDisconnect { break }
                 logger.error("WS receive error: \(error.localizedDescription)")
-                await handleUnexpectedDisconnect()
+                await handleUnexpectedDisconnect(sessionWasAlive: wsSessionReceivedData)
                 break
             }
         }
@@ -546,16 +557,34 @@ final class TerminalBrowserViewModel {
     }
 
     @MainActor
-    private func handleUnexpectedDisconnect() async {
+    private func handleUnexpectedDisconnect(sessionWasAlive: Bool = true) async {
         guard isShellReady, !intentionalDisconnect else { return }
         isShellReady = false
         tearDownWebSocket()
-        // Keep terminalSessionId — we want to reconnect to the same PTY, not create a new one
-        logger.info("Terminal WebSocket disconnected unexpectedly")
 
-        // Auto-reconnect — only if the panel is open and terminal section is expanded
-        if isPanelOpen && isTerminalExpanded {
-            feedToTerminal("\r\n\u{001B}[33m[Connection lost — reconnecting…]\u{001B}[0m\r\n")
+        if sessionWasAlive {
+            // Session was alive (we received data) — keep the session ID so we
+            // reconnect to the same PTY and preserve running processes.
+            logger.info("Terminal WebSocket disconnected unexpectedly (session was alive)")
+        } else {
+            // The server closed the connection before sending any data — the
+            // server-side PTY session is dead (e.g. server restarted, idle timeout).
+            // Clear the stale ID so the reconnect path creates a fresh session.
+            logger.info("Terminal WebSocket closed before receiving data — PTY session likely dead, will create fresh session")
+            terminalSessionId = nil
+        }
+
+        // Auto-reconnect whenever the panel is open, regardless of whether the
+        // terminal section is currently expanded. This prevents a race where the
+        // panel opens (triggering a connect attempt that discovers the session is
+        // dead) before the user has expanded the terminal row — the old guard
+        // `isPanelOpen && isTerminalExpanded` would skip the retry, leaving a
+        // blank terminal until the user tapped inside.
+        if isPanelOpen {
+            if isTerminalExpanded {
+                feedToTerminal("\r\n\u{001B}[33m[Connection lost — reconnecting…]\u{001B}[0m\r\n")
+            }
+            reconnectAttempt = 0
             scheduleAutoReconnect()
         }
     }
@@ -564,9 +593,19 @@ final class TerminalBrowserViewModel {
 
     private func scheduleAutoReconnect() {
         guard reconnectAttempt < Self.maxReconnectAttempts else {
-            // Exhausted retries — show a message so the user knows
-            feedToTerminal("\r\n\u{001B}[31m[Connection lost. Tap ↺ to reconnect.]\u{001B}[0m\r\n")
+            // Exhausted retries against the existing session — the PTY is likely
+            // gone. Clear the stale session ID and spin up a brand-new one
+            // automatically instead of asking the user to tap ↺.
+            logger.info("Auto-reconnect exhausted existing-session attempts — falling back to fresh session")
+            terminalSessionId = nil
             reconnectAttempt = 0
+            cancelAutoReconnect()
+            autoReconnectTask = Task { [weak self] in
+                // Brief pause before the final fresh-session attempt
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard !Task.isCancelled else { return }
+                await self?.startShell()
+            }
             return
         }
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## v4.8.1 — May 31, 2026
+
+### Bug Fixes
+- Fixed terminal shell failing to reconnect automatically after being idle — it now correctly detects a dead session and establishes a fresh connection instead of silently giving up.
+- Fixed app becoming unresponsive (buttons not tappable) after returning from a long background session
+
 ## v4.8 — May 28, 2026
 
 ### What's New

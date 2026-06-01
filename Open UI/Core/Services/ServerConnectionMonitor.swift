@@ -196,11 +196,39 @@ final class ServerConnectionMonitor: @unchecked Sendable {
         consecutiveFailures = 0
         logger.debug("App foregrounded — triggering immediate health check + socket reconnect")
 
+        // Optimistically assume we're connected on foreground return.
+        //
+        // When the app is backgrounded for a long time the OS may drop the
+        // network path, causing NWPathMonitor to fire transitionTo(.internetDown)
+        // which sets isShowingOverlay = true.  If we don't clear that overlay
+        // here, the full-screen black "Connection lost" view blocks all tap-based
+        // interactions while we wait for the first post-resume health check to
+        // complete (which can take several seconds while the iOS network stack wakes
+        // back up). Gesture recognizers still work, which is why swiping the drawer
+        // would "unblock" things.
+        //
+        // By optimistically marking the connection as restored here we immediately
+        // hide the overlay, restoring touch interactivity. If the health check that
+        // follows actually fails (real server down), the overlay will reappear after
+        // the normal 3-second debounce — which is the correct behaviour.
+        if connectionState != .connected {
+            connectionState = .connected
+            disconnectedSince = nil
+            reconnectAttempt = 0
+            isShowingOverlay = false
+            debounceTask?.cancel()
+            debounceTask = nil
+            logger.info("Foreground: optimistically cleared disconnect overlay — health check will follow")
+        }
+
         foregroundTask?.cancel()
         foregroundTask = Task { [weak self] in
-            // Small delay to let the network stack settle after the OS
-            // resumes the app (avoids a spurious failure on the very first request)
-            try? await Task.sleep(for: .milliseconds(300))
+            // Give the iOS network stack more time to fully wake up after a long
+            // suspension before we fire the health check. 300 ms was often not
+            // enough — the first request would fail, causing two rapid failures
+            // that re-triggered the overlay immediately on foreground.
+            // 1.5 s is still fast enough to feel instant but avoids false positives.
+            try? await Task.sleep(for: .milliseconds(1500))
             guard !Task.isCancelled else { return }
 
             // Reconnect socket proactively (cancels any pending backoff timer)
