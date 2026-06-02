@@ -503,6 +503,8 @@ struct ChatSettingsView: View {
     @AppStorage("expandThinkingWhileStreaming") private var expandThinkingWhileStreaming = true
     @AppStorage("streamingAutoScroll") private var streamingAutoScroll = true
     @AppStorage("citationShowDomain") private var citationShowDomain: Bool = true
+    @AppStorage("renderUserMarkdown") private var renderUserMarkdown: Bool = false
+    @AppStorage("renderAssistantMarkdown") private var renderAssistantMarkdown: Bool = true
     @AppStorage("quickPills") private var quickPillsData: String = ""
     @State private var availableTools: [ToolItem] = []
     @State private var isLoadingTools = false
@@ -621,6 +623,17 @@ struct ChatSettingsView: View {
                 Text("Citations")
             } footer: {
                 Text("When enabled, citation badges show the website domain (e.g. bbc.com). When disabled, the page title is shown instead.")
+            }
+
+            Section {
+                Toggle("Render markdown in user messages", isOn: $renderUserMarkdown)
+                    .tint(theme.brandPrimary)
+                Toggle("Render markdown in AI messages", isOn: $renderAssistantMarkdown)
+                    .tint(theme.brandPrimary)
+            } header: {
+                Text("Markdown Rendering")
+            } footer: {
+                Text("Control whether markdown formatting (bold, headers, code blocks) is rendered in messages. Disabling shows raw text.")
             }
         }
         .navigationTitle("Chat Settings")

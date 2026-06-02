@@ -956,6 +956,13 @@ struct MainChatView: View {
             }
             .onChange(of: scenePhase) { oldPhase, newPhase in
                 if newPhase == .active && oldPhase != .active {
+                    // Reset any stale drag state so hit-testing is never blocked on foreground.
+                    // If the user backgrounded mid-swipe, dragOffset could be non-zero which
+                    // makes drawerFraction > 0 → allowsHitTesting(false) on the main content.
+                    dragOffset = 0
+                    isDraggingDrawer = false
+                    fileBrowserDragOffset = 0
+                    isDraggingFileBrowser = false
                     Task { await refreshAllDataOnForeground() }
                     // Reconnect terminal WebSocket if the panel is open and terminal is expanded
                     terminalBrowserVM.handleAppForeground()
@@ -1222,14 +1229,21 @@ struct MainChatView: View {
         // If we're NOT already on the new-chat screen, just navigate there
         // without resetting the VM — the transcription can keep running.
         // Only remove + recreate the VM when there's no ongoing work.
-        if !currentNewVM.hasActiveTranscriptions {
+        let shouldRecreateVM = !currentNewVM.hasActiveTranscriptions
+        if shouldRecreateVM {
             dependencies.activeChatStore.remove(nil)
-            newChatGeneration += 1
         }
 
-        activeConversationId = nil
-        activeChannelId = nil
-        activeFolderWorkspaceId = nil
+        // Keep ALL state mutations in one withAnimation pass so SwiftUI
+        // performs a single animated view-identity transition (no flash/revert).
+        withAnimation(.easeInOut(duration: 0.2)) {
+            activeConversationId = nil
+            activeChannelId = nil
+            activeFolderWorkspaceId = nil
+            if shouldRecreateVM {
+                newChatGeneration += 1
+            }
+        }
         // Reset terminal file browser state so it starts fresh in the new chat
         closeFileBrowserAnimated()
         terminalBrowserVM.reset()
@@ -1244,14 +1258,13 @@ struct MainChatView: View {
             // Show channel detail inline (same as how chats work)
             ChannelDetailView(channelId: channelId, channelListVM: channelListVM)
                 .id("channel-\(channelId)")
-                .transition(.opacity)
         } else if let conversationId = activeConversationId {
             ChatDetailView(
                 conversationId: conversationId,
                 viewModel: dependencies.activeChatStore.viewModel(for: conversationId)
             )
+            .onDeleteChat { startNewChat() }
             .id(conversationId)
-            .transition(.opacity)
         } else if let folderWorkspaceId = activeFolderWorkspaceId {
             // Folder workspace: new chat screen locked to this folder.
             // The ChatViewModel receives folder context so when the user
@@ -1264,7 +1277,6 @@ struct MainChatView: View {
                 folderWorkspace: folder
             )
             .id("folder-workspace-\(folderWorkspaceId)-\(newChatGeneration)")
-            .transition(.opacity)
             .onAppear {
                 // Set folder context on the VM so new chats are created in this folder
                 let folderDetail = listViewModel.folderViewModel.activeFolderDetail
@@ -1282,7 +1294,6 @@ struct MainChatView: View {
                 viewModel: dependencies.activeChatStore.viewModel(for: nil)
             )
             .id("new-chat-\(newChatGeneration)")
-            .transition(.opacity)
         }
     }
 

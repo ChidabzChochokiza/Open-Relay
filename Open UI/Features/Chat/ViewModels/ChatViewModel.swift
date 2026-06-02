@@ -82,6 +82,10 @@ final class ChatViewModel {
     /// Bumped each time a regenerate begins. Observed by ChatDetailView to trigger scroll-to-bottom.
     var regenerateScrollToken: UUID = UUID()
     var inputText: String = ""
+    /// Toggled to `true` by the Ask text-selection action to request keyboard focus.
+    /// `ChatDetailView` observes this via `.onChange` and sets `isEditFieldFocused`.
+    /// Reset to `false` immediately after focus is granted.
+    var shouldFocusInput: Bool = false
     var attachments: [ChatAttachment] = []
     var webSearchEnabled: Bool = false {
         didSet {

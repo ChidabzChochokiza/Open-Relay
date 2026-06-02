@@ -444,7 +444,6 @@ struct iPadMainChatView: View {
         if let channelId = activeChannelId {
             ChannelDetailView(channelId: channelId, channelListVM: channelListVM)
                 .id("channel-\(channelId)")
-                .transition(.opacity)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
                         Button { startNewChat() } label: {
@@ -461,8 +460,8 @@ struct iPadMainChatView: View {
                 conversationId: conversationId,
                 viewModel: dependencies.activeChatStore.viewModel(for: conversationId)
             )
+            .onDeleteChat { startNewChat() }
             .id(conversationId)
-            .transition(.opacity)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { startNewChat() } label: {
@@ -480,7 +479,6 @@ struct iPadMainChatView: View {
                 ?? listViewModel.folderViewModel.activeFolderDetail
             ChatDetailView(viewModel: vm, folderWorkspace: folder)
                 .id("folder-workspace-\(folderWorkspaceId)-\(newChatGeneration)")
-                .transition(.opacity)
                 .onAppear {
                     let folderDetail = listViewModel.folderViewModel.activeFolderDetail
                     vm.setFolderContext(
@@ -503,7 +501,6 @@ struct iPadMainChatView: View {
         } else {
             ChatDetailView(viewModel: dependencies.activeChatStore.viewModel(for: nil))
                 .id("new-chat-\(newChatGeneration)")
-                .transition(.opacity)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
                         Button { startNewChat() } label: {
@@ -578,14 +575,21 @@ struct iPadMainChatView: View {
         }
 
         // Only remove + recreate the VM when there's no ongoing transcription work.
-        if !currentNewVM.hasActiveTranscriptions {
+        let shouldRecreateVM = !currentNewVM.hasActiveTranscriptions
+        if shouldRecreateVM {
             dependencies.activeChatStore.remove(nil)
-            newChatGeneration += 1
         }
 
-        activeConversationId = nil
-        activeChannelId = nil
-        activeFolderWorkspaceId = nil
+        // Keep ALL state mutations in one withAnimation pass so SwiftUI
+        // performs a single animated view-identity transition (no flash/revert).
+        withAnimation(.easeInOut(duration: 0.2)) {
+            activeConversationId = nil
+            activeChannelId = nil
+            activeFolderWorkspaceId = nil
+            if shouldRecreateVM {
+                newChatGeneration += 1
+            }
+        }
         terminalBrowserVM.reset()
         showTerminalBrowser = true
         Haptics.play(.light)

@@ -1,5 +1,20 @@
 # Changelog
 
+## v4.9 — June 2, 2026
+
+### What's New
+- Added "Ask" and "Explain" buttons to the text selection menu in assistant messages — select any text to quote it into the input box or instantly ask for an explanation.
+- Added delete chat button to the chat toolbar — tap ··· in any chat and choose Delete to permanently remove it (with confirmation).
+- Added Markdown Rendering toggles in Settings → Chat Behavior — independently control whether markdown is rendered in your messages and AI messages.
+- Added scroll to top navigation fab
+
+### Improvements
+- Tapping the new chat button now transitions smoothly instead of abruptly flashing the UI.
+- Sources bar now shows a +N badge when a response has more than 3 citation sources, keeping the bar compact while making all sources accessible.
+
+### Bug Fixes
+- Fixed app becoming unresponsive to taps when returning from background with the sidebar partially open mid-swipe
+
 ## v4.8.1 — May 31, 2026
 
 ### Bug Fixes

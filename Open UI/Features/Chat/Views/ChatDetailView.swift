@@ -40,6 +40,9 @@ struct ChatDetailView: View {
     @State private var scrollPosition: ScrollPosition = .init()
     /// True when the user has manually scrolled away from the bottom.
     @State private var isScrolledUp = false
+    /// True when the scroll position is at or very near the top (offset.y < 50pt).
+    /// Used to hide the ↑ FAB when already at the top.
+    @State private var isAtTop = false
     /// Cached scroll content height — updated via onScrollGeometryChange.
     @State private var viewState_contentHeight: CGFloat = 0
     /// Cached scroll container height — updated via onScrollGeometryChange.
@@ -113,6 +116,9 @@ struct ChatDetailView: View {
     // Bug 10: cached indexMap rebuilt only when message count changes.
     @State private var cachedIndexMap: [String: Int] = [:]
 
+    // MARK: Chat menu actions
+    @State private var showDeleteChatConfirm = false
+
     // MARK: Dictation
     @State private var isDictating = false
 
@@ -172,6 +178,19 @@ struct ChatDetailView: View {
     }
 
     private var _folderWorkspace: ChatFolder?
+
+    /// Called after the chat is successfully deleted, so the parent can
+    /// navigate away smoothly (e.g. animate to new chat). Defaults to nil
+    /// which falls back to router.popToRoot().
+    private var deleteChatAction: (() -> Void)?
+
+    /// Chainable modifier — lets call sites set the post-delete callback:
+    /// `ChatDetailView(viewModel: vm).onDeleteChat { startNewChat() }`
+    func onDeleteChat(_ action: @escaping () -> Void) -> ChatDetailView {
+        var copy = self
+        copy.deleteChatAction = action
+        return copy
+    }
 
     // MARK: - Body
 
@@ -415,6 +434,25 @@ struct ChatDetailView: View {
                 Task { await viewModel.sendMessage() }
             }
         }
+        // Handle "Ask" / "Explain" taps from the text selection menu in assistant
+        // messages. Extracted into a private extension to keep the type-checker
+        // expression size manageable.
+        .applyTextSelectionHandlers(viewModel: viewModel)
+        // Drive keyboard focus via the ViewModel flag rather than directly setting
+        // FocusState from inside an onReceive — the indirect path avoids a race
+        // with UIKit's responder-chain cleanup (LTXLabel calls resignFirstResponder
+        // during clearSelection(), which fires after the menu dismisses).
+        .onChange(of: viewModel.shouldFocusInput) { _, newValue in
+            guard newValue else { return }
+            // Prevent the keyboard appearance from triggering an auto-scroll —
+            // the user is looking at the selected text they want to ask about
+            // and should stay at their current scroll position.
+            isScrolledUp = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                NotificationCenter.default.post(name: .chatInputFieldRequestFocus, object: nil)
+                viewModel.shouldFocusInput = false
+            }
+        }
         .overlay {
             if isDownloadingFile {
                 ZStack {
@@ -494,6 +532,7 @@ struct ChatDetailView: View {
             codePreviewLanguage: $codePreviewLanguage,
             onDismissOverlays: { dismissAllPickers() }
         )
+        .applyDeleteChatConfirmation(isPresented: $showDeleteChatConfirm, onDelete: performDeleteChat)
     }
 
     // MARK: - Toolbar
@@ -575,6 +614,25 @@ struct ChatDetailView: View {
                 .buttonStyle(.plain)
                 .disabled(viewModel.isSavingTemporaryChat)
                 .accessibilityLabel("Save as permanent chat")
+            }
+            // ··· overflow menu
+            if viewModel.conversation != nil || !viewModel.messages.isEmpty {
+                Menu {
+                    if viewModel.conversation != nil {
+                        Button(role: .destructive) {
+                            showDeleteChatConfirm = true
+                        } label: {
+                            Label("Delete Chat", systemImage: "trash")
+                        }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .scaledFont(size: 13, weight: .medium)
+                        .foregroundStyle(theme.textTertiary)
+                        .frame(width: 34, height: 34)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
             }
         }
     }
@@ -1027,16 +1085,17 @@ struct ChatDetailView: View {
             if !viewModel.isLoadingConversation && viewModel.messages.isEmpty {
                 if let folder = _folderWorkspace {
                     folderWelcomeView(folder: folder)
-                        .transition(.opacity.animation(.easeInOut(duration: 0.2)))
                 } else {
                     welcomeView
-                        .transition(.opacity.animation(.easeInOut(duration: 0.2)))
                 }
             }
         }
-        // FAB overlay
+        // FAB overlay — attached pill group: ↑ (top half) + ↓ (bottom half) when scrolled away from bottom.
+        // Both appear together as one unit. ↑ is hidden when already at the very top.
         .overlay(alignment: .bottomTrailing) {
-            scrollToBottomFAB
+            scrollFABGroup
+                .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isScrolledUp)
+                .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isAtTop)
         }
         .onAppear {
             // Snap instantly to bottom on chat open.
@@ -1078,9 +1137,9 @@ struct ChatDetailView: View {
             isUserDriving = false
 
             if old == 0 {
-                // Delay first scroll so the welcome view's 200ms opacity-out finishes first.
+                // Brief delay so the welcome view swap and initial layout settle.
                 Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    try? await Task.sleep(nanoseconds: 150_000_000)
                     withAnimation(.easeOut(duration: 0.3)) {
                         scrollPosition.scrollTo(edge: .bottom)
                     }
@@ -1184,6 +1243,10 @@ struct ChatDetailView: View {
             // All other cases (layout reflows, programmatic scrolls, WKWebView resizes)
             // emit .animating/.idle → isUserDriving is false → no state change.
 
+            // ── At-top detection for ↑ FAB ──
+            let atTop = newOffset.y < 50
+            if atTop != isAtTop { isAtTop = atTop }
+
             // ── Sliding window: load older messages when near the top ──
             let total = viewModel.messages.count
             let effectiveEnd = windowEnd ?? total
@@ -1257,38 +1320,70 @@ struct ChatDetailView: View {
         }
     }
 
-    // MARK: - Scroll-to-Bottom FAB
+    // MARK: - Scroll FAB Pill Group
 
     @ViewBuilder
-    private var scrollToBottomFAB: some View {
+    private var scrollFABGroup: some View {
         if isScrolledUp && !viewModel.messages.isEmpty && !viewModel.isLoadingConversation {
-            ZStack {
-                Circle()
-                    .fill(.ultraThinMaterial)
-                    .frame(width: 38, height: 38)
-                    .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
-                Circle()
-                    .strokeBorder(theme.cardBorder.opacity(0.35), lineWidth: 0.5)
-                    .frame(width: 38, height: 38)
-                Image(systemName: "chevron.down")
-                    .scaledFont(size: 13, weight: .bold)
-                    .foregroundStyle(theme.textSecondary)
-            }
-            .contentShape(Circle())
-            .highPriorityGesture(
-                TapGesture().onEnded {
-                    // Disengage auto-scroll lock first so the streaming pump
-                    // doesn't fight the scroll animation we're about to start.
+            VStack(spacing: 0) {
+                // ↑ FAB — only shown when NOT already at the very top
+                if !isAtTop {
+                    Button {
+                        isScrolledUp = true
+                        isAtTop = false
+                        windowEnd = windowSize
+                        windowSize = min(maxWindowSize, viewModel.messages.count)
+                        withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) {
+                            scrollPosition.scrollTo(edge: .top)
+                        }
+                        Haptics.play(.light)
+                    } label: {
+                        ZStack {
+                            Rectangle()
+                                .fill(.ultraThinMaterial)
+                                .frame(width: 38, height: 38)
+                            Image(systemName: "chevron.up")
+                                .scaledFont(size: 13, weight: .bold)
+                                .foregroundStyle(theme.textSecondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Scroll to top")
+
+                    // Hairline divider between the two halves
+                    Rectangle()
+                        .fill(theme.cardBorder.opacity(0.4))
+                        .frame(width: 38, height: 0.5)
+                }
+
+                // ↓ FAB — always shown when isScrolledUp
+                Button {
                     isScrolledUp = false
-                    // Reset sliding window to latest messages
                     windowEnd = nil
                     windowSize = min(maxWindowSize, viewModel.messages.count)
                     withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) {
                         scrollPosition.scrollTo(edge: .bottom)
                     }
                     Haptics.play(.light)
+                } label: {
+                    ZStack {
+                        Rectangle()
+                            .fill(.ultraThinMaterial)
+                            .frame(width: 38, height: 38)
+                        Image(systemName: "chevron.down")
+                            .scaledFont(size: 13, weight: .bold)
+                            .foregroundStyle(theme.textSecondary)
+                    }
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Scroll to bottom")
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(theme.cardBorder.opacity(0.35), lineWidth: 0.5)
             )
+            .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
             .padding(.trailing, Spacing.md)
             .padding(.bottom, Spacing.sm)
             .transition(
@@ -1298,8 +1393,6 @@ struct ChatDetailView: View {
                 )
                 .animation(.spring(response: 0.3, dampingFraction: 0.7))
             )
-            .accessibilityLabel("Scroll to bottom")
-            .accessibilityAddTraits(.isButton)
         }
     }
 
@@ -1576,12 +1669,12 @@ struct ChatDetailView: View {
         // interactive elements (links, text selection) that onTapGesture would block.
         // Assistant action bar is always visible so no tap-reveal is needed.
         .if(message.role == .user) { view in
-            view.onTapGesture {
+            view.simultaneousGesture(TapGesture().onEnded {
                 withAnimation(MicroAnimation.snappy) {
                     activeActionMessageId = activeActionMessageId == message.id ? nil : message.id
                 }
                 Haptics.play(.light)
-            }
+            })
         }
         .if(message.role != .assistant) { view in
             view.contextMenu { messageContextMenu(for: message) }
@@ -2490,6 +2583,16 @@ struct ChatDetailView: View {
                     ForEach(Array(sources.prefix(3).enumerated()), id: \.offset) { _, source in
                         sourceIconBadge(source: source)
                     }
+                    if sources.count > 3 {
+                        Circle()
+                            .fill(theme.surfaceContainer)
+                            .frame(width: 18, height: 18)
+                            .overlay(
+                                Text("+\(sources.count - 3)")
+                                    .scaledFont(size: 8, weight: .bold)
+                                    .foregroundStyle(theme.textSecondary)
+                            )
+                    }
                 }
                 Text("\(sources.count) Source\(sources.count == 1 ? "" : "s")")
                     .scaledFont(size: 12, weight: .medium)
@@ -2672,6 +2775,24 @@ struct ChatDetailView: View {
                 description: model.description,
                 profileImageURL: model.profileImageURL
             )
+        }
+    }
+
+    /// Deletes the current conversation and either calls the parent-supplied
+    /// `deleteChatAction` callback (for smooth animated navigation to a new chat)
+    /// or falls back to `router.popToRoot()` when used standalone.
+    private func performDeleteChat() {
+        guard let conversationId = viewModel.conversation?.id else { return }
+        let action = deleteChatAction
+        Task {
+            try? await dependencies.conversationManager?.deleteConversation(id: conversationId)
+            await MainActor.run {
+                if let action {
+                    withAnimation(.easeInOut(duration: 0.25)) { action() }
+                } else {
+                    router.popToRoot()
+                }
+            }
         }
     }
 
@@ -3512,7 +3633,7 @@ private struct IsolatedAssistantMessage: View {
     /// APIClient for rendering inline images via AuthenticatedImageView.
     var apiClient: APIClient? = nil
 
-    /// Observed so that toggling "Show citation domains" in Settings immediately re-renders citation badges.
+    @AppStorage("renderAssistantMarkdown") private var renderAssistantMarkdown: Bool = true
 
     var body: some View {
         let isActivelyStreaming = streamingStore.streamingMessageId == message.id
@@ -3584,51 +3705,77 @@ private struct IsolatedAssistantMessage: View {
             // Prose split is only safe when the live tail has no special block at all.
             let liveTailHasSpecial = liveTailHasUnclosedDetails || liveTailHasViz
 
-            VStack(alignment: .leading, spacing: 0) {
-                AssistantMessageContent(
-                    content: streamingStore.frozenContent,
-                    isStreaming: false,
-                    messageEmbeds: message.embeds,
-                    authToken: authToken,
-                    serverBaseURL: serverBaseURL,
-                    apiClient: apiClient
-                )
-                if !liveTailStr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    if !liveTailHasSpecial && !streamingStore.liveTailFrozenProse.isEmpty {
-                        // Further split at prose boundary within the live tail
-                        StreamingMarkdownView(content: streamingStore.liveTailFrozenProse, isStreaming: false)
-                        if !streamingStore.liveTailLiveProse.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            StreamingMarkdownView(content: streamingStore.liveTailLiveProse, isStreaming: true)
+            if renderAssistantMarkdown {
+                VStack(alignment: .leading, spacing: 0) {
+                    AssistantMessageContent(
+                        content: streamingStore.frozenContent,
+                        isStreaming: false,
+                        messageEmbeds: message.embeds,
+                        authToken: authToken,
+                        serverBaseURL: serverBaseURL,
+                        apiClient: apiClient
+                    )
+                    if !liveTailStr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        if !liveTailHasSpecial && !streamingStore.liveTailFrozenProse.isEmpty {
+                            // Further split at prose boundary within the live tail
+                            StreamingMarkdownView(content: streamingStore.liveTailFrozenProse, isStreaming: false)
+                            if !streamingStore.liveTailLiveProse.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                StreamingMarkdownView(content: streamingStore.liveTailLiveProse, isStreaming: true)
+                            }
+                        } else {
+                            // VIZ content must stream; only unclosed <details> disables streaming.
+                            StreamingMarkdownView(content: liveTailStr, isStreaming: !liveTailHasUnclosedDetails)
                         }
-                    } else {
-                        // VIZ content must stream; only unclosed <details> disables streaming.
-                        StreamingMarkdownView(content: liveTailStr, isStreaming: !liveTailHasUnclosedDetails)
                     }
                 }
+                .transaction { $0.animation = nil }
+            } else {
+                Text(streamingStore.displayContent)
+                    .scaledFont(size: 15, context: .content)
+                    .foregroundStyle(.primary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .transaction { $0.animation = nil }
             }
-            .transaction { $0.animation = nil }
         } else if isActivelyStreaming && !streamingStore.pureFrozenProse.isEmpty {
             // ── Pure-prose split path ─────────────────────────────────────────
             //
             // No tool/reasoning blocks. Pipeline pre-slices at paragraph boundary.
             // pureFrozenProse is stable until the boundary advances (~every 400 chars).
-            VStack(alignment: .leading, spacing: 0) {
-                StreamingMarkdownView(content: streamingStore.pureFrozenProse, isStreaming: false)
-                if !streamingStore.pureLiveProse.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    StreamingMarkdownView(content: streamingStore.pureLiveProse, isStreaming: true)
+            if renderAssistantMarkdown {
+                VStack(alignment: .leading, spacing: 0) {
+                    StreamingMarkdownView(content: streamingStore.pureFrozenProse, isStreaming: false)
+                    if !streamingStore.pureLiveProse.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        StreamingMarkdownView(content: streamingStore.pureLiveProse, isStreaming: true)
+                    }
                 }
+                .transaction { $0.animation = nil }
+            } else {
+                Text(streamingStore.displayContent)
+                    .scaledFont(size: 15, context: .content)
+                    .foregroundStyle(.primary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .transaction { $0.animation = nil }
             }
-            .transaction { $0.animation = nil }
         } else {
             // ── Fallback: full AssistantMessageContent (non-streaming or short message) ─
-            AssistantMessageContent(
-                content: displayContent,
-                isStreaming: effectiveIsStreaming,
-                messageEmbeds: message.embeds,
-                authToken: authToken,
-                serverBaseURL: serverBaseURL,
-                apiClient: apiClient
-            )
+            if renderAssistantMarkdown {
+                AssistantMessageContent(
+                    content: displayContent,
+                    isStreaming: effectiveIsStreaming,
+                    messageEmbeds: message.embeds,
+                    authToken: authToken,
+                    serverBaseURL: serverBaseURL,
+                    apiClient: apiClient
+                )
+            } else {
+                Text(displayContent)
+                    .scaledFont(size: 15, context: .content)
+                    .foregroundStyle(.primary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 
@@ -3797,6 +3944,7 @@ private func superscriptNumber(_ n: Int) -> String {
 struct UserMessageContentView: View {
     let content: String
     @Environment(\.theme) private var theme
+    @AppStorage("renderUserMarkdown") private var renderUserMarkdown: Bool = false
 
     /// Parses `content` into alternating text / skill segments.
     /// Pattern: `<$slug|slug>` — captures the slug before `|`.
@@ -3824,14 +3972,18 @@ struct UserMessageContentView: View {
     }
 
     var body: some View {
-        let segs = segments
-        let hasChips = segs.contains { if case .skill = $0 { return true }; return false }
-
-        if !hasChips {
+        if renderUserMarkdown {
+            let segs = segments
+            let hasChips = segs.contains { if case .skill = $0 { return true }; return false }
+            if !hasChips {
+                Text(content)
+                    .scaledFont(size: 15, context: .content)
+            } else {
+                SkillTaggedTextView(segments: segs)
+            }
+        } else {
             Text(content)
                 .scaledFont(size: 15, context: .content)
-        } else {
-            SkillTaggedTextView(segments: segs)
         }
     }
 }
@@ -4215,6 +4367,26 @@ private extension View {
     }
 }
 
+// MARK: - Delete Chat Confirmation (Type-Checker Relief)
+
+private extension View {
+    func applyDeleteChatConfirmation(
+        isPresented: Binding<Bool>,
+        onDelete: @escaping () -> Void
+    ) -> some View {
+        self.confirmationDialog(
+            "Delete this chat?",
+            isPresented: isPresented,
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) { onDelete() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This conversation will be permanently deleted.")
+        }
+    }
+}
+
 // MARK: - Widget & Picker Notification Handlers (Type-Checker Relief)
 
 /// Extracted into a View extension to reduce the expression complexity of
@@ -4286,6 +4458,35 @@ private extension View {
                         viewModel.processWebURL(urlString: urlString)
                     }
                 }
+            }
+    }
+}
+
+// MARK: - Text Selection Handlers (Type-Checker Relief)
+
+/// Handles "Ask" / "Explain" taps from the LTXLabel text selection menu in
+/// assistant messages. Extracted from body so the Swift type-checker doesn't
+/// have to resolve these two `.onReceive` closures inline.
+private extension View {
+    func applyTextSelectionHandlers(viewModel: ChatViewModel) -> some View {
+        self
+            // "Ask": quote the selected text into the input box so the user can
+            // type a follow-up question (cursor placed after the quote), then
+            // signal the ViewModel to request keyboard focus. The actual
+            // FocusState mutation happens in .onChange(of: viewModel.shouldFocusInput)
+            // in the body — that indirect path avoids racing with LTXLabel's
+            // resignFirstResponder() call during clearSelection().
+            .onReceive(NotificationCenter.default.publisher(for: .ltxLabelAskSelection)) { notification in
+                guard let selected = notification.userInfo?["selectedText"] as? String,
+                      !selected.isEmpty else { return }
+                viewModel.inputText = "\"\(selected)\"\n"
+                viewModel.shouldFocusInput = true
+            }
+            // "Explain": pre-fill "Explain: [text]" ready to send (no keyboard needed).
+            .onReceive(NotificationCenter.default.publisher(for: .ltxLabelExplainSelection)) { notification in
+                guard let selected = notification.userInfo?["selectedText"] as? String,
+                      !selected.isEmpty else { return }
+                viewModel.inputText = "Explain: \"\(selected)\""
             }
     }
 }
