@@ -497,11 +497,10 @@ enum TTSTextPreprocessor {
         result = result.replacingOccurrences(of: "θ", with: " theta ")
         result = result.replacingOccurrences(of: "ω", with: " omega ")
 
-        result = regexReplace(result, pattern: "\\$(\\d)", with: "$1 dollars")
-        result = regexReplace(result, pattern: "€(\\d)", with: "$1 euros")
-        result = regexReplace(result, pattern: "£(\\d)", with: "$1 pounds")
-        result = regexReplace(result, pattern: "¥(\\d)", with: "$1 yen")
-        result = regexReplace(result, pattern: "₹(\\d)", with: "$1 rupees")
+        // Currency: handle full amounts with optional thousand-separators and cents
+        // e.g. $3,500 → "three thousand five hundred dollars"
+        //      $1,200,000.50 → "one million two hundred thousand dollars and fifty cents"
+        result = expandCurrencyAmounts(result)
 
         result = regexReplace(result, pattern: "(\\w)\\s*&\\s*(\\w)", with: "$1 and $2")
         result = regexReplace(result, pattern: "(\\w)\\s*@\\s*(\\w)", with: "$1 at $2")
@@ -513,6 +512,79 @@ enum TTSTextPreprocessor {
         result = result.replacingOccurrences(of: "…", with: ", ")
         result = regexReplace(result, pattern: "#(\\d)", with: "number $1")
 
+        return result
+    }
+
+    // MARK: - Currency Expansion
+
+    /// Expands currency amounts to fully spoken form.
+    /// Handles thousand-separated amounts, cents, and multiple currencies.
+    /// e.g. $3,500 → "three thousand five hundred dollars"
+    ///      €1,200,000.50 → "one million two hundred thousand euros and fifty cents"
+    ///      £99.99 → "ninety-nine pounds and ninety-nine pence"
+    private static func expandCurrencyAmounts(_ text: String) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .spellOut
+        formatter.locale = Locale(identifier: "en_US")
+
+        // Pattern: currency symbol followed by digits with optional thousand-commas and optional cents
+        let pattern = "([\\$€£¥₹])([\\d,]+(?:\\.\\d{1,2})?)"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+
+        let nsText = text as NSString
+        var result = text
+        let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+
+        for match in matches.reversed() {
+            guard let fullRange = Range(match.range, in: result),
+                  let symbolRange = Range(match.range(at: 1), in: result),
+                  let amountRange = Range(match.range(at: 2), in: result) else { continue }
+
+            let symbol = String(result[symbolRange])
+            let amountString = String(result[amountRange]).replacingOccurrences(of: ",", with: "")
+
+            let (currencyUnit, centsUnit): (String, String) = {
+                switch symbol {
+                case "$":  return ("dollar", "cent")
+                case "€":  return ("euro", "cent")
+                case "£":  return ("pound", "penny")
+                default:
+                    // Determine word from NSString source to handle ¥ and ₹
+                    let sym = nsText.substring(with: match.range(at: 1))
+                    if sym == "¥" { return ("yen", "sen") }
+                    if sym == "₹" { return ("rupee", "paisa") }
+                    return ("dollar", "cent")
+                }
+            }()
+
+            var spoken = ""
+            if amountString.contains(".") {
+                let parts = amountString.split(separator: ".", maxSplits: 1)
+                let wholePart = parts.count > 0 ? String(parts[0]) : "0"
+                let centsPart = parts.count > 1 ? String(parts[1]) : "0"
+
+                if let wholeNum = Int64(wholePart),
+                   let wholeWords = formatter.string(from: NSNumber(value: wholeNum)) {
+                    let plural = wholeNum == 1 ? currencyUnit : "\(currencyUnit)s"
+                    spoken = "\(wholeWords) \(plural)"
+                }
+                if let centsNum = Int(centsPart), centsNum > 0,
+                   let centsWords = formatter.string(from: NSNumber(value: centsNum)) {
+                    let plural = centsNum == 1 ? centsUnit : "\(centsUnit)s"
+                    spoken += spoken.isEmpty ? "\(centsWords) \(plural)" : " and \(centsWords) \(plural)"
+                }
+            } else {
+                if let num = Int64(amountString),
+                   let words = formatter.string(from: NSNumber(value: num)) {
+                    let plural = num == 1 ? currencyUnit : "\(currencyUnit)s"
+                    spoken = "\(words) \(plural)"
+                }
+            }
+
+            if !spoken.isEmpty {
+                result.replaceSubrange(fullRange, with: spoken)
+            }
+        }
         return result
     }
 

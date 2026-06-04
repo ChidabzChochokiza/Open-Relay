@@ -1,5 +1,20 @@
 # Changelog
 
+## v4.9.2 — June 4, 2026
+
+### What's New
+- Read Aloud (Server TTS only) now continues playing your response when you put the app in background allowing you to listen to long responses while navigating other apps on your phone.
+
+### Improvements
+- Improved scroll FABs: The ↑ button jumps to the previous question
+- App and server update checks now happen when returning from background as well.
+- Terminal button in chat input now only appears when the selected model has terminal capability enabled — configure per model in the workspace model editor. Matches openwebui changes.
+
+### Bug Fixes
+- Fixed currency amounts being read incorrectly by TTS
+- Fixed text selection popup (Ask/Explain menu) auto-closing after 2 seconds
+- Fixed regenerated responses not fully settling markdown
+
 ## v4.9 — June 2, 2026
 
 ### What's New

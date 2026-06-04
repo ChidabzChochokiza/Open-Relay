@@ -139,6 +139,14 @@ struct AIModel: Codable, Identifiable, Hashable, Sendable {
         builtinTools["memory"] == true
     }
 
+    /// Whether the terminal capability is enabled for this model.
+    /// Reads `capabilities["terminal"]` which is stored as a string `"true"/"false"`
+    /// (capabilities dict uses `[String: String]` via compactMapValues).
+    var supportsTerminal: Bool {
+        guard let val = capabilities?["terminal"] else { return false }
+        return val == "true" || val == "1"
+    }
+
     /// A short display name, extracting the model name after any provider prefix.
     var shortName: String {
         if let lastSlash = name.lastIndex(of: "/") {

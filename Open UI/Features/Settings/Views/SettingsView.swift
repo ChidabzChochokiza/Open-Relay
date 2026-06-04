@@ -572,15 +572,6 @@ struct ChatSettingsView: View {
                 Text("Haptic feedback pulses as each token streams in.")
             }
 
-            // Section {
-            //     Toggle("Auto-scroll when response starts", isOn: $streamingAutoScroll)
-            //         .tint(theme.brandPrimary)
-            // } header: {
-            //     Text("Scroll Behavior")
-            // } footer: {
-            //     Text("When enabled, the chat automatically scrolls to the bottom as a response streams in. When disabled, your position is unchanged — scroll to the bottom manually to follow along.")
-            // }
-
             Section {
                 Toggle("Auto-generate chat titles", isOn: $titleGenerationEnabled)
                     .tint(theme.brandPrimary)
@@ -1244,13 +1235,31 @@ struct TTSSettingsView: View {
         do {
             let config = try await apiClient.getAudioConfig()
             if let tts = config["tts"] as? [String: Any] {
-                let model = (tts["MODEL"] as? String) ?? ""
-                serverConfiguredModel = model
+                let model   = (tts["MODEL"]  as? String) ?? ""
+                let engine  = (tts["ENGINE"] as? String) ?? ""
+
+                // Display the model name if set, otherwise fall back to the engine identifier
+                // (e.g. "openai" when Kokoro is proxied through the OpenAI-compatible endpoint).
+                serverConfiguredModel = model.isEmpty ? engine : model
+
+                // Populate serverModel on the TTS service so it is sent in the
+                // /api/v1/audio/speech request body — required by downstream backends
+                // like Kokoro (port 8880) that reject requests without a model field.
+                ttsService.serverModel = model.isEmpty ? (engine.isEmpty ? nil : engine) : model
+
                 let configVoice = (tts["VOICE"] as? String) ?? ""
                 if !configVoice.isEmpty {
                     ttsService.serverDefaultVoice = configVoice
                     if serverVoiceId.isEmpty {
                         ttsService.serverVoiceId = configVoice
+                    }
+                } else {
+                    // Server has no VOICE configured. Pick a sensible default so the
+                    // preview and read-aloud requests don't 400 with an empty voice field.
+                    // "af_heart" is the default Kokoro voice and also works for most
+                    // OpenAI-compatible TTS backends that use Kokoro under the hood.
+                    if ttsService.serverDefaultVoice == nil {
+                        ttsService.serverDefaultVoice = "af_heart"
                     }
                 }
             }

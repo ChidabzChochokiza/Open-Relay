@@ -41,12 +41,19 @@ struct ChatDetailView: View {
     /// True when the user has manually scrolled away from the bottom.
     @State private var isScrolledUp = false
     /// True when the scroll position is at or very near the top (offset.y < 50pt).
-    /// Used to hide the ↑ FAB when already at the top.
+    /// Used to hide the ↑ FAB when already at the very top.
     @State private var isAtTop = false
+    /// The index (into `viewModel.messages`) of the user message we last jumped to via the ↑ FAB.
+    /// nil = haven't jumped yet (next tap jumps to the user message nearest the current viewport top).
+    /// Reset to nil whenever the user scrolls back to the bottom.
+    @State private var userMessageJumpIndex: Int? = nil
     /// Cached scroll content height — updated via onScrollGeometryChange.
     @State private var viewState_contentHeight: CGFloat = 0
     /// Cached scroll container height — updated via onScrollGeometryChange.
     @State private var viewState_containerHeight: CGFloat = 0
+    /// Current scroll offset Y — tracked continuously to determine which user message
+    /// is near the viewport top when the ↑ FAB is first tapped.
+    @State private var currentScrollOffsetY: CGFloat = 0
     /// True while a user gesture (finger touch or inertia deceleration) is driving
     /// the scroll view. This is the ONLY condition under which auto-scroll can be
     /// disengaged — layout reflows, WKWebView resizes, and programmatic scrolls
@@ -301,9 +308,21 @@ struct ChatDetailView: View {
         }
         // Stop TTS when app enters background to prevent Metal GPU crashes
         // and keep the speakingMessageId state in sync with actual playback.
+        // NOTE: Server TTS (AVQueuePlayer) is intentionally NOT stopped here.
+        // AVQueuePlayer continues playing in the background via UIBackgroundModes "audio".
+        // Stopping it here would deactivate the shared AVAudioSession before iOS grants
+        // background audio priority, killing the audio. On-device engines (Kokoro/Qwen3)
+        // MUST be stopped to prevent Metal GPU crashes in the background.
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+            let tts = dependencies.textToSpeechService
+            if tts.activeEngine == .server {
+                // Server TTS keeps playing in background — do NOT stop it here.
+                // speakingMessageId stays set so the stop button is still shown when
+                // the user returns to the foreground and the audio has finished.
+                return
+            }
             if speakingMessageId != nil || ttsGeneratingMessageId != nil {
-                dependencies.textToSpeechService.stop()
+                tts.stop()
                 speakingMessageId = nil
                 ttsGeneratingMessageId = nil
             }
@@ -858,7 +877,7 @@ struct ChatDetailView: View {
                 selectedToolIds: $vm.selectedToolIds,
                 isLoadingTools: vm.isLoadingTools,
                 terminalEnabled: vm.terminalEnabled,
-                isTerminalAvailable: !vm.availableTerminalServers.isEmpty,
+                isTerminalAvailable: !vm.availableTerminalServers.isEmpty && vm.isTerminalCapableForSelectedModel,
                 terminalServerName: vm.selectedTerminalServer?.displayName ?? "",
                 availableTerminalServers: vm.availableTerminalServers,
                 onTerminalToggle: { viewModel.toggleTerminal() },
@@ -1214,7 +1233,7 @@ struct ChatDetailView: View {
         .scrollIndicators(.hidden)
         .scrollDismissesKeyboard(editingMessageId != nil ? .never : .interactively)
         .defaultScrollAnchor(.bottom)
-        .scrollPosition($scrollPosition, anchor: .bottom)
+        .scrollPosition($scrollPosition)
         // Detect scroll position to show/hide FAB + auto-load pagination
         // Track whether the user's finger (or inertia) is driving the scroll view.
         // This is the single gate that allows auto-scroll to disengage:
@@ -1230,11 +1249,17 @@ struct ChatDetailView: View {
         .onScrollGeometryChange(for: CGPoint.self) { geo in
             geo.contentOffset
         } action: { _, newOffset in
+            // Track raw offset for the ↑ FAB "find current question" logic.
+            currentScrollOffsetY = newOffset.y
+
             let distanceFromBottom = max(0,
                 viewState_contentHeight - newOffset.y - viewState_containerHeight)
-            if distanceFromBottom <= 100 {
-                // Scrolled to within 100pt of the bottom — re-engage auto-scroll.
-                if isScrolledUp { isScrolledUp = false }
+            if distanceFromBottom <= 80 {
+                // Scrolled to within 80pt of the bottom — re-engage auto-scroll and hide FABs.
+                if isScrolledUp {
+                    isScrolledUp = false
+                    userMessageJumpIndex = nil
+                }
             } else if isUserDriving {
                 // User's finger (or inertia) is actively driving the scroll view —
                 // the ONLY condition under which auto-scroll is allowed to disengage.
@@ -1326,15 +1351,57 @@ struct ChatDetailView: View {
     private var scrollFABGroup: some View {
         if isScrolledUp && !viewModel.messages.isEmpty && !viewModel.isLoadingConversation {
             VStack(spacing: 0) {
-                // ↑ FAB — only shown when NOT already at the very top
+                // ↑ FAB — jumps to the previous user question on each tap
                 if !isAtTop {
                     Button {
-                        isScrolledUp = true
-                        isAtTop = false
-                        windowEnd = windowSize
-                        windowSize = min(maxWindowSize, viewModel.messages.count)
+                        // Build sorted list of user message indices from the full message list
+                        let allMessages = viewModel.messages
+                        let userIndices = allMessages.indices.filter { allMessages[$0].role == .user }
+                        guard !userIndices.isEmpty else { return }
+
+                        // Determine the target: one step before the last jump position,
+                        // or the last user message if we haven't jumped yet.
+                        let targetIdx: Int
+                        if let currentJump = userMessageJumpIndex {
+                            // Subsequent taps: find the user message just before the current jump position
+                            if let pos = userIndices.lastIndex(where: { $0 < currentJump }) {
+                                targetIdx = userIndices[pos]
+                            } else {
+                                // Already at or before the first user message — stay there
+                                targetIdx = userIndices.first!
+                            }
+                        } else {
+                            // First tap: find the user message whose index is at or just above
+                            // the current viewport top. We estimate the message index linearly
+                            // from the scroll offset — good enough for direction, not pixel-perfect.
+                            // total here is the full message count (allMessages.count), not the window.
+                            let estimatedMsgIdx: Int = {
+                                guard viewState_contentHeight > 0 else { return allMessages.count - 1 }
+                                let fraction = currentScrollOffsetY / viewState_contentHeight
+                                return Int(fraction * CGFloat(allMessages.count))
+                            }()
+                            // Find the last user message at or before the estimated viewport top.
+                            // This is the "current context" question — the one whose answer
+                            // the user is likely reading.
+                            if let pos = userIndices.lastIndex(where: { $0 <= estimatedMsgIdx }) {
+                                targetIdx = userIndices[pos]
+                            } else {
+                                // Estimated index is before any user message — jump to first
+                                targetIdx = userIndices.first!
+                            }
+                        }
+                        userMessageJumpIndex = targetIdx
+
+                        // Expand the window to include this message if needed
+                        let total = allMessages.count
+                        if windowEnd != nil || targetIdx < max(0, (windowEnd ?? total) - windowSize) {
+                            windowEnd = min(targetIdx + windowSize, total)
+                            if windowEnd! > total { windowEnd = nil }
+                            windowSize = min(maxWindowSize, total)
+                        }
+
                         withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) {
-                            scrollPosition.scrollTo(edge: .top)
+                            scrollPosition.scrollTo(id: allMessages[targetIdx].id, anchor: UnitPoint(x: 0.5, y: 0))
                         }
                         Haptics.play(.light)
                     } label: {
@@ -1348,7 +1415,7 @@ struct ChatDetailView: View {
                         }
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Scroll to top")
+                    .accessibilityLabel("Jump to previous question")
 
                     // Hairline divider between the two halves
                     Rectangle()
@@ -1359,6 +1426,7 @@ struct ChatDetailView: View {
                 // ↓ FAB — always shown when isScrolledUp
                 Button {
                     isScrolledUp = false
+                    userMessageJumpIndex = nil
                     windowEnd = nil
                     windowSize = min(maxWindowSize, viewModel.messages.count)
                     withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) {

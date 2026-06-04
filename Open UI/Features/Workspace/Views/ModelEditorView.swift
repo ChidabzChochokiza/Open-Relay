@@ -55,6 +55,7 @@ struct ModelEditorView: View {
     @State private var capWebSearch = true
     @State private var capImageGeneration = true
     @State private var capCodeInterpreter = true
+    @State private var capTerminal = false
     @State private var capUsage = true
     @State private var capCitations = true
     @State private var capStatusUpdates = true
@@ -310,6 +311,7 @@ struct ModelEditorView: View {
                         capVision: $capVision, capFileUpload: $capFileUpload,
                         capFileContext: $capFileContext, capWebSearch: $capWebSearch,
                         capImageGeneration: $capImageGeneration, capCodeInterpreter: $capCodeInterpreter,
+                        capTerminal: $capTerminal,
                         capUsage: $capUsage, capCitations: $capCitations,
                         capStatusUpdates: $capStatusUpdates, capBuiltinTools: $capBuiltinTools,
                         defaultWebSearch: $defaultWebSearch, defaultImageGen: $defaultImageGen,
@@ -1039,6 +1041,7 @@ struct ModelEditorView: View {
                     capCheckbox("Web Search", systemImage: "magnifyingglass", value: $capWebSearch)
                     capCheckbox("Image Generation", systemImage: "photo.badge.plus", value: $capImageGeneration)
                     capCheckbox("Code Interpreter", systemImage: "chevron.left.forwardslash.chevron.right", value: $capCodeInterpreter)
+                    capCheckbox("Terminal", systemImage: "terminal", value: $capTerminal)
                     capCheckbox("Usage", systemImage: "chart.bar", value: $capUsage)
                     capCheckbox("Citations", systemImage: "quote.bubble", value: $capCitations)
                     capCheckbox("Status Updates", systemImage: "info.circle", value: $capStatusUpdates)
@@ -1314,6 +1317,7 @@ struct ModelEditorView: View {
         capVision = model.capVision; capFileUpload = model.capFileUpload
         capFileContext = model.capFileContext; capWebSearch = model.capWebSearch
         capImageGeneration = model.capImageGeneration; capCodeInterpreter = model.capCodeInterpreter
+        capTerminal = model.capTerminal
         capUsage = model.capUsage; capCitations = model.capCitations
         capStatusUpdates = model.capStatusUpdates; capBuiltinTools = model.capBuiltinTools
 
@@ -1526,6 +1530,7 @@ struct ModelEditorView: View {
             systemPrompt: systemPrompt,
             capVision: capVision, capFileUpload: capFileUpload, capFileContext: capFileContext,
             capWebSearch: capWebSearch, capImageGeneration: capImageGeneration, capCodeInterpreter: capCodeInterpreter,
+            capTerminal: capTerminal,
             capUsage: capUsage, capCitations: capCitations, capStatusUpdates: capStatusUpdates, capBuiltinTools: capBuiltinTools,
             defaultFeatureWebSearch: defaultWebSearch, defaultFeatureImageGen: defaultImageGen, defaultFeatureCodeInterpreter: defaultCodeInterpreter,
             builtinTime: builtinTime, builtinMemory: builtinMemory, builtinChats: builtinChats,
@@ -2525,6 +2530,7 @@ struct ModelToolsAndCapabilitiesSection: View {
     @Binding var capWebSearch: Bool
     @Binding var capImageGeneration: Bool
     @Binding var capCodeInterpreter: Bool
+    @Binding var capTerminal: Bool
     @Binding var capUsage: Bool
     @Binding var capCitations: Bool
     @Binding var capStatusUpdates: Bool
@@ -2766,6 +2772,7 @@ struct ModelToolsAndCapabilitiesSection: View {
                     capCheckbox("Web Search", value: $capWebSearch)
                     capCheckbox("Image Generation", value: $capImageGeneration)
                     capCheckbox("Code Interpreter", value: $capCodeInterpreter)
+                    capCheckbox("Terminal", value: $capTerminal)
                     capCheckbox("Usage", value: $capUsage)
                     capCheckbox("Citations", value: $capCitations)
                     capCheckbox("Status Updates", value: $capStatusUpdates)

@@ -1582,9 +1582,12 @@ final class APIClient: @unchecked Sendable {
         )
     }
 
-    func generateSpeech(text: String, voice: String? = nil) async throws -> (Data, String) {
+    func generateSpeech(text: String, voice: String? = nil, model: String? = nil) async throws -> (Data, String) {
         var body: [String: Any] = ["input": text]
         if let voice { body["voice"] = voice }
+        // Include model when known — required by some downstream TTS backends (e.g. Kokoro)
+        // that reject requests with no model field with a 400 error.
+        if let model, !model.isEmpty { body["model"] = model }
         let bodyData = try JSONSerialization.data(withJSONObject: body)
 
         // Log the exact request body being sent
@@ -1592,7 +1595,7 @@ final class APIClient: @unchecked Sendable {
             logger.debug("🔊 [TTS] POST /api/v1/audio/speech — body: \(bodyString)")
         }
         logger.debug("🔊 [TTS] input text (\(text.count) chars): \"\(String(text.prefix(200)))\"")
-        logger.debug("🔊 [TTS] voice: \(voice ?? "<nil — using server default>")")
+        logger.debug("🔊 [TTS] voice: \(voice ?? "<nil — using server default>"), model: \(model ?? "<nil>")")
 
         let (data, response) = try await network.requestRaw(
             path: "/api/v1/audio/speech",

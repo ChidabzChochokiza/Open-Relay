@@ -166,6 +166,10 @@ final class ChatViewModel {
     var terminalEnabled: Bool = false
     /// The currently selected terminal server (auto-selects first if only one).
     var selectedTerminalServer: TerminalServer?
+    /// True if the currently selected model has the terminal capability enabled.
+    var isTerminalCapableForSelectedModel: Bool {
+        selectedModel?.supportsTerminal ?? false
+    }
     var isLoadingKnowledge: Bool = false
     var isShowingKnowledgePicker: Bool = false
     var knowledgeSearchQuery: String = ""
@@ -3092,6 +3096,13 @@ final class ChatViewModel {
         // 6. Re-derive the flat messages list from the tree.
         conversation!.rederiveMessages()
 
+        // Mark the new assistant message as streaming so the DRAIN-DEFERRAL
+        // system works correctly (rederiveMessages() rebuilds from HistoryNode
+        // which has no isStreaming field, so it defaults to false).
+        if let idx = conversation?.messages.firstIndex(where: { $0.id == newAssistantId }) {
+            conversation?.messages[idx].isStreaming = true
+        }
+
         // Reset the task list — the new regen branch starts with no tasks.
         tasks = []
         conversation?.tasks = []
@@ -3498,6 +3509,14 @@ final class ChatViewModel {
         regenerateScrollToken = UUID()
 
         streamingStore.beginStreaming(messageId: assistantMessageId, modelId: modelId)
+
+        // Mark the assistant message as streaming so the DRAIN-DEFERRAL system
+        // works correctly. editMessage() creates the placeholder with the default
+        // isStreaming: false (rederiveMessages rebuilds from HistoryNode which has
+        // no isStreaming field), bypassing the drain deferral without this.
+        if let idx = conversation?.messages.firstIndex(where: { $0.id == assistantMessageId }) {
+            conversation?.messages[idx].isStreaming = true
+        }
 
         chatSubscription?.dispose()
         chatSubscription = nil

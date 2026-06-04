@@ -71,6 +71,11 @@ final class TextToSpeechService: NSObject {
     /// Used as the fallback when the user selects "Server Default" (serverVoiceId == nil).
     var serverDefaultVoice: String?
 
+    /// The TTS model name configured on the server (from /api/v1/audio/config tts.MODEL or ENGINE).
+    /// Sent in the request body to /api/v1/audio/speech so the downstream TTS server
+    /// (e.g. Kokoro at port 8880) receives a valid model field and doesn't 400.
+    var serverModel: String?
+
     /// When set to true, output is forced to the loudspeaker after each audio session setup.
     /// Set by VoiceCallViewModel to persist speaker routing through the TTS pipeline.
     var speakerOverrideEnabled: Bool = false
@@ -104,19 +109,19 @@ final class TextToSpeechService: NSObject {
     // Server TTS gapless pipeline (AVQueuePlayer-based)
     /// Gapless player — items are enqueued as audio data arrives from the server.
     private var queuePlayer: AVQueuePlayer?
-    /// KVO observation for end-of-queue detection.
-    private var queuePlayerObservation: NSKeyValueObservation?
     /// Tracks how many items are currently queued or playing.
     private var queuedItemCount: Int = 0
     /// Tracks how many items have finished playing.
     private var finishedItemCount: Int = 0
 
-    /// Max number of audio chunks to fetch ahead of the currently playing chunk.
-    private let serverPrefetchCount = 2
     /// Buffer of pre-fetched AVPlayerItem instances ready to enqueue (FIFO).
     private var prefetchedItems: [AVPlayerItem] = []
     /// Background task that keeps the prefetch buffer filled.
     private var prefetchTask: Task<Void, Never>?
+    /// iOS background task assertion — keeps the prefetch Task alive when the app backgrounds.
+    /// iOS grants ~30s of background CPU time; enough to finish fetching all audio chunks so
+    /// AVQueuePlayer has the full buffer and can keep playing without the network.
+    private var serverBGTaskID: UIBackgroundTaskIdentifier = .invalid
     /// Maps each AVPlayerItem to the temp file URL backing it so we can delete after playback.
     private var playerItemTempURLs: [AVPlayerItem: URL] = [:]
     /// Token for the `didPlayToEndTimeNotification` observer — must be removed via this token,
@@ -298,6 +303,8 @@ final class TextToSpeechService: NSObject {
 
     /// Stops all speech and clears all queues.
     func stop() {
+        print("🔊[TTS] stop() called — activeEngine=\(activeEngine), isUsingServer=\(isUsingServer), state=\(state)")
+        print("🔊[TTS] stop() call stack:\n\(Thread.callStackSymbols.prefix(12).joined(separator: "\n"))")
         // Clear streaming mode flag BEFORE stopping the on-device service so the
         // queue pipeline's wait-loop exits cleanly rather than waiting for more text.
         kokoroService.streamingModeActive = false
@@ -321,6 +328,7 @@ final class TextToSpeechService: NSObject {
         state = .idle
 
         // Deactivate audio session to release hardware resources
+        print("🔊[TTS] stop() — calling deactivateAudioSession()")
         deactivateAudioSession()
 
         // Re-enable auto-lock now that TTS has been stopped.
@@ -337,8 +345,6 @@ final class TextToSpeechService: NSObject {
         isUsingServer = false
         queuedItemCount = 0
         finishedItemCount = 0
-        queuePlayerObservation?.invalidate()
-        queuePlayerObservation = nil
         queuePlayer?.pause()
         queuePlayer?.removeAllItems()
         queuePlayer = nil
@@ -354,6 +360,15 @@ final class TextToSpeechService: NSObject {
         for url in orphanedURLs {
             try? FileManager.default.removeItem(at: url)
         }
+        // Release the iOS background task assertion (if any).
+        endServerBackgroundTask()
+    }
+
+    /// Ends the iOS background task assertion for the server TTS prefetch pipeline.
+    private func endServerBackgroundTask() {
+        guard serverBGTaskID != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(serverBGTaskID)
+        serverBGTaskID = .invalid
     }
 
     func pause() {
@@ -558,6 +573,9 @@ final class TextToSpeechService: NSObject {
     /// **Completion** is detected by observing `AVQueuePlayer.currentItem` — when
     /// it goes nil and the producer is done, we know all audio has played.
     private func startServerPipeline() {
+        let session = AVAudioSession.sharedInstance()
+        print("🔊[TTS] startServerPipeline() — category=\(session.category.rawValue) mode=\(session.mode.rawValue) active=\(session.isOtherAudioPlaying)")
+
         guard let apiClient else {
             isRunningServerQueue = false
             isUsingServer = false
@@ -568,26 +586,45 @@ final class TextToSpeechService: NSObject {
         }
 
         let voiceId = serverVoiceId ?? serverDefaultVoice
+        let modelId = serverModel
         let speakerOverride = speakerOverrideEnabled
 
         // Configure audio session before starting the player.
-        // Voice calls use .voiceChat mode for echo cancellation + HFP mic routing.
-        // All other TTS (chat read-aloud) uses the global baseline (.playAndRecord .default)
-        // so it ignores the silent switch and mixes with other app audio.
-        let session = AVAudioSession.sharedInstance()
         if speakerOverride {
-            try? session.setCategory(.playAndRecord, mode: .voiceChat,
-                                     options: [.allowBluetoothHFP, .allowBluetoothA2DP, .mixWithOthers])
-            try? session.setActive(true)
-            // setActive resets overrideOutputAudioPort — re-apply the current routing preference.
+            let result = Result { try session.setCategory(.playAndRecord, mode: .voiceChat,
+                                     options: [.allowBluetoothHFP, .allowBluetoothA2DP, .mixWithOthers]) }
+            print("🔊[TTS] setCategory(.playAndRecord .voiceChat): \(result)")
+            let result2 = Result { try session.setActive(true) }
+            print("🔊[TTS] setActive(true) voiceCall: \(result2)")
             try? session.overrideOutputAudioPort(outputPortOverride)
         } else {
-            // Global baseline: .playAndRecord ignores silent switch; .defaultToSpeaker routes
-            // to loud speaker; .mixWithOthers doesn't interrupt other app audio.
-            try? session.setCategory(.playAndRecord, mode: .default,
-                                     options: [.defaultToSpeaker, .allowBluetoothHFP,
-                                               .allowBluetoothA2DP, .mixWithOthers])
-            try? session.setActive(true)
+            let result = Result { try session.setCategory(.playback, mode: .default,
+                                     options: [.allowBluetoothHFP, .allowBluetoothA2DP]) }
+            print("🔊[TTS] setCategory(.playback .default): \(result)")
+            let result2 = Result { try session.setActive(true) }
+            print("🔊[TTS] setActive(true) playback: \(result2)")
+        }
+        print("🔊[TTS] after session setup — category=\(session.category.rawValue) mode=\(session.mode.rawValue)")
+
+        // Listen for audio session interruptions — this is how iOS tells us the session was killed
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: session,
+            queue: .main
+        ) { note in
+            let type = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt ?? 999
+            let reason = note.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt ?? 999
+            print("🔊[TTS] ⚠️ AVAudioSession INTERRUPTION — type=\(type) reason=\(reason) userInfo=\(note.userInfo as Any)")
+        }
+
+        // Listen for route changes
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: session,
+            queue: .main
+        ) { note in
+            let reason = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ?? 999
+            print("🔊[TTS] AVAudioSession ROUTE CHANGE — reason=\(reason)")
         }
 
         // Create a fresh AVQueuePlayer for this playback session
@@ -596,20 +633,12 @@ final class TextToSpeechService: NSObject {
         queuePlayer = player
         queuedItemCount = 0
         finishedItemCount = 0
+        print("🔊[TTS] AVQueuePlayer created — bgTaskID=\(serverBGTaskID.rawValue)")
 
-        // Observe currentItem going nil (queue exhausted) to detect end-of-playback
-        queuePlayerObservation = player.observe(\.currentItem, options: [.new]) { [weak self] player, _ in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                // currentItem == nil means the queue is empty and playback finished
-                guard player.currentItem == nil else { return }
-                // Only fire completion if the producer is done AND we actually played something
-                guard !self.isRunningServerQueue else { return }
-                self.handleServerPlaybackComplete()
-            }
-        }
-
-        // Register for per-item end notifications so we can track finished count.
+        // Register for per-item end notifications to track finished count.
+        // This is the authoritative completion signal — more reliable than KVO on
+        // currentItem which fires briefly between items during gapless playback,
+        // causing false completions that cut audio short.
         // Temp files are NOT deleted here — they're deleted in bulk in stopServerPlayback()
         // once the session ends, to avoid any race with AVQueuePlayer's gapless buffering.
         // IMPORTANT: Store the returned token so we can properly remove this observer later.
@@ -629,7 +658,23 @@ final class TextToSpeechService: NSObject {
             }
         }
 
-        // Producer: fetch audio chunks and enqueue as AVPlayerItems
+        // Request background execution time from iOS so the prefetch Task can finish
+        // fetching all audio chunks even if the user backgrounds the app mid-sentence.
+        // iOS grants ~30s; more than enough to buffer a full TTS response.
+        // The assertion is released when the pipeline finishes or stopServerPlayback() is called.
+        if serverBGTaskID == .invalid {
+            serverBGTaskID = UIApplication.shared.beginBackgroundTask(withName: "ServerTTSPrefetch") { [weak self] in
+                // iOS expiry handler — we're out of background time. Release gracefully.
+                Task { @MainActor [weak self] in
+                    self?.endServerBackgroundTask()
+                }
+            }
+        }
+
+        // Producer: fetch ALL audio chunks eagerly and enqueue as AVPlayerItems.
+        // No throttle — we want every chunk buffered to disk ASAP so that even if
+        // the background task expires mid-sentence, AVQueuePlayer already has the
+        // full audio queue and can play it without any further network calls.
         prefetchTask = Task { [weak self] in
             guard let self else { return }
             var producedAtLeastOne = false
@@ -641,25 +686,20 @@ final class TextToSpeechService: NSObject {
                 }
 
                 guard let text = chunk else {
-                    // Queue empty — wait briefly for streaming to add more
+                    // Queue empty — wait briefly for streaming to add more chunks
                     try? await Task.sleep(for: .milliseconds(80))
                     let stillEmpty = await MainActor.run { self.serverQueue.isEmpty }
                     if stillEmpty { break }
                     continue
                 }
 
-                // Throttle: don't fetch too far ahead
-                while !Task.isCancelled {
-                    let ahead = await MainActor.run { self.queuedItemCount - self.finishedItemCount }
-                    if ahead < self.serverPrefetchCount { break }
-                    try? await Task.sleep(for: .milliseconds(50))
-                }
                 guard !Task.isCancelled else { break }
 
                 do {
                     let (audioData, contentType) = try await apiClient.generateSpeech(
                         text: text,
-                        voice: voiceId
+                        voice: voiceId,
+                        model: modelId
                     )
                     // Write audio data to a temp file so AVPlayerItem can load it via URL.
                     // AVPlayerItem has no in-memory data initialiser; a file URL is required.
@@ -690,7 +730,11 @@ final class TextToSpeechService: NSObject {
                 }
             }
 
-            // Producer done — mark queue as no longer running
+            // Producer done — mark queue as no longer running.
+            // All chunks are now buffered in AVQueuePlayer; no more network calls needed.
+            // NOTE: we do NOT release the background task here. AVQueuePlayer needs the
+            // audio session alive while it drains the queue. endServerBackgroundTask()
+            // is called in stopServerPlayback() once all items finish playing.
             await MainActor.run {
                 self.isRunningServerQueue = false
                 // If nothing was produced (all chunks errored), complete immediately
@@ -715,7 +759,12 @@ final class TextToSpeechService: NSObject {
         stopServerPlayback()
         if !isStreamingTTS {
             state = .idle
-            deactivateAudioSession()
+            // NOTE: do NOT call deactivateAudioSession() here.
+            // AVQueuePlayer is backed by AVAudioSession; calling setActive(false) while
+            // iOS still considers us a background audio app causes iOS to immediately
+            // revoke our background audio priority, suspending any in-flight audio.
+            // The audio session is deactivated in stop() only — when the user explicitly
+            // stops TTS, not on natural completion.
             enableIdleTimer()
             if hadItems {
                 onComplete?()
@@ -772,10 +821,11 @@ final class TextToSpeechService: NSObject {
                 // setActive resets overrideOutputAudioPort — re-apply earpiece/speaker preference.
                 try session.overrideOutputAudioPort(outputPortOverride)
             } else {
-                // Regular read-aloud — use global baseline so silent switch is ignored.
-                try session.setCategory(.playAndRecord, mode: .default,
-                                        options: [.defaultToSpeaker, .allowBluetoothHFP,
-                                                  .allowBluetoothA2DP, .mixWithOthers])
+                // Regular read-aloud — .playback ignores the silent switch and keeps
+                // audio alive in background (UIBackgroundModes "audio" required).
+                try session.setCategory(.playback, mode: .default,
+                                        options: [.allowBluetoothHFP, .allowBluetoothA2DP,
+                                                  .mixWithOthers])
                 try session.setActive(true)
             }
         } catch {

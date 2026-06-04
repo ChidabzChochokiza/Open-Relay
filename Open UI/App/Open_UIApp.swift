@@ -140,6 +140,15 @@ struct Open_UIApp: App {
                         dependencies.connectionMonitor.markAppForeground()
                         dependencies.socketService?.resetBackoffAndReconnect()
 
+                        // Re-check for app + server updates whenever the app returns
+                        // to the foreground (handles the case where an update ships
+                        // while the app is backgrounded). Fails silently on any error.
+                        Task {
+                            async let appCheck: () = dependencies.updateChecker.checkForUpdates()
+                            async let serverCheck: () = dependencies.serverUpdateChecker.checkForUpdates(using: dependencies.apiClient)
+                            _ = await (appCheck, serverCheck)
+                        }
+
                         // Process pending actions after a short delay so that
                         // MainChatView / iPadMainChatView have time to mount
                         // their .onReceive handlers before we post notifications.
@@ -170,11 +179,31 @@ struct Open_UIApp: App {
                         // that would waste battery in the background.
                         dependencies.connectionMonitor.markAppBackground()
                         dependencies.socketService?.markAppBackground()
-                        // Stop Kokoro TTS and unload model before backgrounding to prevent
+                        // Stop on-device TTS (Kokoro/Qwen3) before backgrounding to prevent
                         // Metal GPU crash (kIOGPUCommandBufferCallbackErrorBackgroundExecutionNotPermitted).
                         // .inactive fires before .background, giving us time to release GPU resources.
-                        dependencies.textToSpeechService.stop()
-                        dependencies.textToSpeechService.kokoroService.stopAndUnload()
+                        //
+                        // Server TTS (AVQueuePlayer) is intentionally NOT stopped — it uses no GPU
+                        // and continues playing in the background when UIBackgroundModes includes "audio".
+                        let tts = dependencies.textToSpeechService
+                        let session = AVAudioSession.sharedInstance()
+                        print("🌙[APP] scenePhase=\(newPhase) — tts.activeEngine=\(tts.activeEngine) tts.state=\(tts.state)")
+                        print("🌙[APP] AudioSession before BG — category=\(session.category.rawValue) mode=\(session.mode.rawValue) isActive=\(session.isOtherAudioPlaying)")
+                        if tts.activeEngine == .kokoro || tts.activeEngine == .qwen3 {
+                            print("🌙[APP] Stopping on-device TTS (Kokoro/Qwen3) before background")
+                            tts.stop()
+                        }
+                        // Guard stopAndUnload() — it calls audioPlayer.stop() which calls
+                        // AVAudioSession.setActive(false) on the shared session, killing
+                        // AVQueuePlayer (server TTS) mid-playback. Skip it when server TTS
+                        // is actively playing so background audio continues uninterrupted.
+                        if tts.activeEngine != .server {
+                            print("🌙[APP] Calling kokoroService.stopAndUnload() — engine is \(tts.activeEngine), not server")
+                            tts.kokoroService.stopAndUnload()
+                        } else {
+                            print("🌙[APP] ✅ Skipping stopAndUnload() — server TTS is active, keeping audio session alive")
+                        }
+                        print("🌙[APP] AudioSession after BG handling — category=\(session.category.rawValue) mode=\(session.mode.rawValue)")
 
                         // ASR background safety: pause on-device transcription on iOS < 26.
                         //

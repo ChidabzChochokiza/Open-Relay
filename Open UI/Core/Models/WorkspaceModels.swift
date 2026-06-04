@@ -1175,6 +1175,7 @@ struct ModelDetail: Identifiable, Sendable {
     var capWebSearch: Bool
     var capImageGeneration: Bool
     var capCodeInterpreter: Bool
+    var capTerminal: Bool
     var capUsage: Bool
     var capCitations: Bool
     var capStatusUpdates: Bool
@@ -1265,6 +1266,7 @@ struct ModelDetail: Identifiable, Sendable {
          systemPrompt: String = "",
          capVision: Bool = true, capFileUpload: Bool = true, capFileContext: Bool = true,
          capWebSearch: Bool = true, capImageGeneration: Bool = true, capCodeInterpreter: Bool = true,
+         capTerminal: Bool = false,
          capUsage: Bool = true, capCitations: Bool = true, capStatusUpdates: Bool = true,
          capBuiltinTools: Bool = true,
          defaultFeatureWebSearch: Bool = true, defaultFeatureImageGen: Bool = false,
@@ -1281,7 +1283,7 @@ struct ModelDetail: Identifiable, Sendable {
         self.createdAt = createdAt; self.updatedAt = updatedAt; self.systemPrompt = systemPrompt
         self.capVision = capVision; self.capFileUpload = capFileUpload; self.capFileContext = capFileContext
         self.capWebSearch = capWebSearch; self.capImageGeneration = capImageGeneration
-        self.capCodeInterpreter = capCodeInterpreter; self.capUsage = capUsage
+        self.capCodeInterpreter = capCodeInterpreter; self.capTerminal = capTerminal; self.capUsage = capUsage
         self.capCitations = capCitations; self.capStatusUpdates = capStatusUpdates
         self.capBuiltinTools = capBuiltinTools
         self.defaultFeatureWebSearch = defaultFeatureWebSearch
@@ -1367,6 +1369,7 @@ struct ModelDetail: Identifiable, Sendable {
         self.capWebSearch = caps["web_search"] as? Bool ?? true
         self.capImageGeneration = caps["image_generation"] as? Bool ?? true
         self.capCodeInterpreter = caps["code_interpreter"] as? Bool ?? true
+        self.capTerminal = caps["terminal"] as? Bool ?? false
         self.capUsage = caps["usage"] as? Bool ?? true
         self.capCitations = caps["citations"] as? Bool ?? true
         self.capStatusUpdates = caps["status_updates"] as? Bool ?? true
@@ -1504,7 +1507,7 @@ struct ModelDetail: Identifiable, Sendable {
         meta["capabilities"] = [
             "vision": capVision, "file_upload": capFileUpload, "file_context": capFileContext,
             "web_search": capWebSearch, "image_generation": capImageGeneration,
-            "code_interpreter": capCodeInterpreter, "usage": capUsage,
+            "code_interpreter": capCodeInterpreter, "terminal": capTerminal, "usage": capUsage,
             "citations": capCitations, "status_updates": capStatusUpdates, "builtin_tools": capBuiltinTools
         ]
         var defF: [String] = []
