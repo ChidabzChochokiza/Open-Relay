@@ -180,8 +180,12 @@ struct StreamingMarkdownView: View {
             let segments: [ContentSegment] = resolveSegments()
             if segments.isEmpty {
                 EmptyView()
-            } else if segments.count == 1, case .markdown(let text) = segments[0].kind {
+            } else if !isStreaming, segments.count == 1, case .markdown(let text) = segments[0].kind {
                 // Fast path: plain markdown only — no viz, no ForEach overhead.
+                // Only used when NOT streaming so the container type never changes
+                // mid-stream. If we allowed this during streaming, the view would
+                // swap from bare MarkdownView → VStack{ForEach} the moment a code
+                // fence appears, destroying the prose view for one frame (blank flash).
                 MarkdownView(text, theme: cachedTheme)
                     .codeAutoScroll(true)
             } else {
@@ -1149,7 +1153,7 @@ private struct MarkdownInlineImageView: View {
                             let tokenString = imageURL.absoluteString
                             let store = InlineImageStore.shared
                             decoded = await Task.detached(priority: .userInitiated) {
-                                guard let dataURI = store.resolve(urlString: tokenString) else {
+                                guard let dataURI = await store.resolve(urlString: tokenString) else {
                                     return nil
                                 }
                                 return Self.decodeDataURIString(dataURI)

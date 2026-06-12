@@ -1,5 +1,10 @@
 # Changelog
 
+## v4.10.1 — June 12, 2026
+
+### Improvements
+- Minor visual improvements
+
 ## v4.10 — June 8, 2026
 
 ### What's New

@@ -54,6 +54,11 @@ struct ChatDetailView: View {
     /// Current scroll offset Y — tracked continuously to determine which user message
     /// is near the viewport top when the ↑ FAB is first tapped.
     @State private var currentScrollOffsetY: CGFloat = 0
+    /// The ID of the message currently nearest the top of the visible viewport.
+    /// Captured when streaming ends so we can restore scroll position by identity
+    /// (layout-stable) rather than raw Y offset (invalidated by content-height changes
+    /// like AnimatedPresence follow-up pill animation).
+    @State private var topmostVisibleMessageId: String? = nil
     /// True while a user gesture (finger touch or inertia deceleration) is driving
     /// the scroll view. This is the ONLY condition under which auto-scroll can be
     /// disengaged — layout reflows, WKWebView resizes, and programmatic scrolls
@@ -1152,6 +1157,11 @@ struct ChatDetailView: View {
             // start will re-engage auto-scroll via their own handlers.
             if isScrolledUp && isAssistantAddition && !viewModel.isStreaming { return }
 
+            // Capture whether the user was scrolled up BEFORE resetting the flag.
+            // If they were already at the bottom, .defaultScrollAnchor(.bottom) will
+            // anchor new content automatically — issuing a redundant scrollTo(edge:.bottom)
+            // with animation fights the anchor and causes a visible jump/shift.
+            let wasScrolledUp = isScrolledUp
             isScrolledUp = false
             isUserDriving = false
 
@@ -1164,6 +1174,7 @@ struct ChatDetailView: View {
                     }
                 }
             } else if keyboard.isVisible {
+                // Keyboard dismiss changes the layout significantly — always scroll here.
                 UIApplication.shared.sendAction(
                     #selector(UIResponder.resignFirstResponder),
                     to: nil, from: nil, for: nil)
@@ -1172,20 +1183,32 @@ struct ChatDetailView: View {
                         scrollPosition.scrollTo(edge: .bottom)
                     }
                 }
-            } else {
+            } else if wasScrolledUp {
+                // User was away from the bottom — bring them back.
                 withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
                     scrollPosition.scrollTo(edge: .bottom)
                 }
             }
+            // else: already at bottom — .defaultScrollAnchor(.bottom) handles new content
+            // silently. No explicit scroll needed (would fight the anchor and cause a jump).
         }
-        // Streaming start: re-engage auto-scroll only when streamingAutoScroll is enabled.
-        // When disabled, the user stays at their current position and must manually
-        // scroll to the bottom to pick up the streaming pump.
-        .onChange(of: viewModel.isStreaming) { _, streaming in
-            if streaming && streamingAutoScroll {
+        // Streaming start/end: manage auto-scroll state.
+        // When streaming STARTS with streamingAutoScroll enabled, re-engage and jump to bottom.
+        // When streaming ENDS: the unified render path (IsolatedAssistantMessage) no longer
+        // performs any structural view swap — AssistantMessageContent is always child-0 of
+        // the same VStack, so there is no height-rounding artifact at stream end.
+        // We simply restore the scroll position for users who were scrolled up.
+        .onChange(of: viewModel.isStreaming) { oldStreaming, newStreaming in
+            if newStreaming && streamingAutoScroll {
+                // Stream started — re-engage auto-scroll.
                 isScrolledUp = false
                 isUserDriving = false
                 scrollPosition.scrollTo(edge: .bottom)
+            } else if !newStreaming && oldStreaming {
+                // Stream just ended — do nothing.
+                // .scrollPosition($scrollPosition, anchor: .bottom) handles layout reflow
+                // compensation automatically, so no programmatic scroll is needed here
+                // regardless of whether the user is scrolled up or at the bottom.
             }
         }
         // Resume auto-scroll: when the user taps the FAB (isScrolledUp → false)
@@ -1195,14 +1218,19 @@ struct ChatDetailView: View {
                 scrollPosition.scrollTo(edge: .bottom)
             }
         }
-        // Regenerate: force-scroll to bottom, clear user-driving state.
+        // Regenerate: scroll to bottom only if the user was scrolled up.
+        // If already at the bottom, .defaultScrollAnchor(.bottom) handles
+        // content replacement silently — no explicit scroll needed.
         .onChange(of: viewModel.regenerateScrollToken) { _, _ in
+            let wasScrolledUp = isScrolledUp
             isScrolledUp = false
             isUserDriving = false
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 60_000_000) // 60ms layout settle
-                withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
-                    scrollPosition.scrollTo(edge: .bottom)
+            if wasScrolledUp {
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 60_000_000) // 60ms layout settle
+                    withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
+                        scrollPosition.scrollTo(edge: .bottom)
+                    }
                 }
             }
         }
@@ -1233,7 +1261,7 @@ struct ChatDetailView: View {
         .scrollIndicators(.hidden)
         .scrollDismissesKeyboard(editingMessageId != nil ? .never : .interactively)
         .defaultScrollAnchor(.bottom)
-        .scrollPosition($scrollPosition)
+        .scrollPosition($scrollPosition, anchor: .bottom)
         // Detect scroll position to show/hide FAB + auto-load pagination
         // Track whether the user's finger (or inertia) is driving the scroll view.
         // This is the single gate that allows auto-scroll to disengage:
@@ -1271,6 +1299,22 @@ struct ChatDetailView: View {
             // ── At-top detection for ↑ FAB ──
             let atTop = newOffset.y < 50
             if atTop != isAtTop { isAtTop = atTop }
+
+            // ── Track topmost visible message for layout-stable scroll restore ──
+            // Estimate which message ID is currently at the top of the viewport
+            // using a linear fraction of the scroll offset. This is updated
+            // continuously so we always have a fresh ID ready when streaming ends.
+            if isScrolledUp {
+                let allMsgs = viewModel.messages
+                if !allMsgs.isEmpty && viewState_contentHeight > 0 {
+                    let fraction = max(0, min(1, newOffset.y / viewState_contentHeight))
+                    let estimatedIdx = min(Int(fraction * CGFloat(allMsgs.count)), allMsgs.count - 1)
+                    let newTopId = allMsgs[estimatedIdx].id
+                    if newTopId != topmostVisibleMessageId {
+                        topmostVisibleMessageId = newTopId
+                    }
+                }
+            }
 
             // ── Sliding window: load older messages when near the top ──
             let total = viewModel.messages.count
@@ -3748,101 +3792,108 @@ private struct IsolatedAssistantMessage: View {
                 Spacer()
             }
             .frame(minHeight: 44)
-        } else if isActivelyStreaming && streamingStore.frozenBoundary > 0 {
-
-
-            // ── Split-render path: frozen tool/reasoning + live tail ──────────
+        } else {
+            // ── Unified stable render path ────────────────────────────────────
             //
-            // The background actor pre-slices all strings before publishing.
-            // We read them directly — no @State cache, no String allocation on main.
-            // frozenContent is stable between boundary advances → AssistantMessageContent's
-            // ParseCache hits on every frame (zero re-parse cost).
-            let liveTailStr = streamingStore.liveTail
-            // An unclosed <details> block must disable streaming so the raw HTML
-            // tag text doesn't flash before the block completes.
-            let liveTailHasUnclosedDetails = liveTailStr.contains("<details") && !liveTailStr.contains("</details>")
-            // A VIZ block (including an unclosed one) must still stream so that
-            // InlineVisualizerView receives `isStreaming: true` and uses its
-            // reconcileContent path instead of finalizeContent (which fails
-            // silently on partial HTML). Without this, the whole visualization
-            // box — and any text after @@@VIZ-END — fails to appear during
-            // streaming and only renders after the chat is reopened.
-            // liveTail only contains post-<details> prose text, so a simple contains
-            // is sufficient — no fake markers can exist here.
-            let liveTailHasViz = liveTailStr.contains("@@@VIZ-START")
-            // Prose split is only safe when the live tail has no special block at all.
-            let liveTailHasSpecial = liveTailHasUnclosedDetails || liveTailHasViz
+            // AssistantMessageContent is ALWAYS child-0 of the outer VStack.
+            // This gives it a stable SwiftUI view identity across every render
+            // mode — streaming split, pure-prose split, and the final merged
+            // state — so SwiftUI diffs the content in place rather than tearing
+            // down the subtree when streaming ends.  The previous 3-way
+            // if/else-if/else produced different top-level view types (VStack vs
+            // bare AssistantMessageContent), causing a one-frame blank flash and
+            // a height re-rounding that nudged the scroll position.
+            //
+            // Split-render modes: use frozenBoundary or pureFrozenProse as the
+            // primary content (stable prefix, ParseCache hits every frame) and
+            // append the tiny live tail as a transient second child.  When
+            // streaming ends both useSplit* flags go false, the tail child is
+            // simply removed, and child-0's content transitions to the full
+            // displayContent — a pure prop update with no structural change.
+
+            // useSplitTool: frozen tool/reasoning prefix + live tail.
+            let useSplitTool = isActivelyStreaming && streamingStore.frozenBoundary > 0
+            // useSplitProse: pure-prose frozen prefix + live prose tail.
+            let useSplitProse = isActivelyStreaming && !streamingStore.pureFrozenProse.isEmpty
+
+            // Primary content: stable frozen prefix during streaming, full
+            // displayContent otherwise.  Always fed to AssistantMessageContent.
+            let primaryContent: String = {
+                if useSplitTool  { return streamingStore.frozenContent }
+                if useSplitProse { return streamingStore.pureFrozenProse }
+                return displayContent
+            }()
+            // Primary is never marked streaming — the live tail carries that role.
+            // For short / non-split messages the regular effectiveIsStreaming applies.
+            let primaryIsStreaming = !(useSplitTool || useSplitProse) && effectiveIsStreaming
 
             if renderAssistantMarkdown {
                 VStack(alignment: .leading, spacing: 0) {
                     AssistantMessageContent(
-                        content: streamingStore.frozenContent,
-                        isStreaming: false,
+                        content: primaryContent,
+                        isStreaming: primaryIsStreaming,
                         messageEmbeds: message.embeds,
                         authToken: authToken,
                         serverBaseURL: serverBaseURL,
                         apiClient: apiClient
                     )
-                    if !liveTailStr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        if !liveTailHasSpecial && !streamingStore.liveTailFrozenProse.isEmpty {
-                            // Further split at prose boundary within the live tail
-                            StreamingMarkdownView(content: streamingStore.liveTailFrozenProse, isStreaming: false)
-                            if !streamingStore.liveTailLiveProse.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                StreamingMarkdownView(content: streamingStore.liveTailLiveProse, isStreaming: true)
+                    // ── Live tail: transient streaming-only second child ───────
+                    // Appended during split-render; removed atomically when
+                    // streaming ends.  Child-0 identity is unaffected.
+                    if useSplitTool {
+                        let liveTailStr = streamingStore.liveTail
+                        // An unclosed <details> block must disable streaming so
+                        // the raw HTML tag text doesn't flash before the block
+                        // completes.
+                        let liveTailHasUnclosedDetails = liveTailStr.contains("<details") && !liveTailStr.contains("</details>")
+                        // A VIZ block must still stream so InlineVisualizerView
+                        // receives isStreaming: true and uses its reconcileContent
+                        // path instead of finalizeContent (which fails on partial HTML).
+                        let liveTailHasViz = liveTailStr.contains("@@@VIZ-START")
+                        let liveTailHasSpecial = liveTailHasUnclosedDetails || liveTailHasViz
+
+                        if !liveTailStr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            if !liveTailHasSpecial && !streamingStore.liveTailFrozenProse.isEmpty {
+                                // Further split at prose boundary within the live tail.
+                                // The live segment starts on a new paragraph boundary,
+                                // so we add 16pt to match the CommonMark paragraphSpacing
+                                // that CoreText drops on the last paragraph of a view.
+                                StreamingMarkdownView(content: streamingStore.liveTailFrozenProse, isStreaming: false)
+                                if !streamingStore.liveTailLiveProse.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                    StreamingMarkdownView(content: streamingStore.liveTailLiveProse, isStreaming: true)
+                                        .padding(.top, 16)
+                                }
+                            } else {
+                                // VIZ content must stream; only unclosed <details> disables it.
+                                StreamingMarkdownView(content: liveTailStr, isStreaming: !liveTailHasUnclosedDetails)
                             }
-                        } else {
-                            // VIZ content must stream; only unclosed <details> disables streaming.
-                            StreamingMarkdownView(content: liveTailStr, isStreaming: !liveTailHasUnclosedDetails)
+                        }
+                    } else if useSplitProse {
+                        // Pure-prose live tail.  No tool/reasoning blocks.
+                        // Pipeline pre-slices at paragraph boundary; pureFrozenProse
+                        // is stable until the boundary advances (~every 400 chars).
+                        if !streamingStore.pureLiveProse.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            // The live prose starts on a new paragraph boundary.
+                            // Add 16pt top padding to match CommonMark's paragraphSpacing
+                            // (which CoreText drops on the final paragraph of a view).
+                            // Without this, the two segments render flush against each other.
+                            StreamingMarkdownView(content: streamingStore.pureLiveProse, isStreaming: true)
+                                .padding(.top, 16)
                         }
                     }
+                    // No tail added for non-split / final messages — VStack contains
+                    // only AssistantMessageContent, identical to the old fallback.
                 }
                 .transaction { $0.animation = nil }
             } else {
-                Text(streamingStore.displayContent)
+                // Plain text (markdown rendering disabled).
+                // All states use the same Text view type — no structural change.
+                Text(isActivelyStreaming ? streamingStore.displayContent : displayContent)
                     .scaledFont(size: 15, context: .content)
                     .foregroundStyle(.primary)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .transaction { $0.animation = nil }
-            }
-        } else if isActivelyStreaming && !streamingStore.pureFrozenProse.isEmpty {
-            // ── Pure-prose split path ─────────────────────────────────────────
-            //
-            // No tool/reasoning blocks. Pipeline pre-slices at paragraph boundary.
-            // pureFrozenProse is stable until the boundary advances (~every 400 chars).
-            if renderAssistantMarkdown {
-                VStack(alignment: .leading, spacing: 0) {
-                    StreamingMarkdownView(content: streamingStore.pureFrozenProse, isStreaming: false)
-                    if !streamingStore.pureLiveProse.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        StreamingMarkdownView(content: streamingStore.pureLiveProse, isStreaming: true)
-                    }
-                }
-                .transaction { $0.animation = nil }
-            } else {
-                Text(streamingStore.displayContent)
-                    .scaledFont(size: 15, context: .content)
-                    .foregroundStyle(.primary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .transaction { $0.animation = nil }
-            }
-        } else {
-            // ── Fallback: full AssistantMessageContent (non-streaming or short message) ─
-            if renderAssistantMarkdown {
-                AssistantMessageContent(
-                    content: displayContent,
-                    isStreaming: effectiveIsStreaming,
-                    messageEmbeds: message.embeds,
-                    authToken: authToken,
-                    serverBaseURL: serverBaseURL,
-                    apiClient: apiClient
-                )
-            } else {
-                Text(displayContent)
-                    .scaledFont(size: 15, context: .content)
-                    .foregroundStyle(.primary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
