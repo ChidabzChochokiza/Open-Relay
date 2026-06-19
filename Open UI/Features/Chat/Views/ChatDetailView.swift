@@ -550,14 +550,9 @@ struct ChatDetailView: View {
                 .accessibilityLabel("Menu")
             }
 
-            // Center: model selector + optional temp-chat badge
+            // Center: model selector
             HStack(spacing: Spacing.xs) {
                 modelSelectorButton
-                if viewModel.isTemporaryChat {
-                    Image(systemName: "eye.slash.fill")
-                        .scaledFont(size: 11, weight: .semibold)
-                        .foregroundStyle(theme.warning)
-                }
             }
             .id(viewModel.selectedModelId ?? "none")
             .frame(maxWidth: .infinity)
