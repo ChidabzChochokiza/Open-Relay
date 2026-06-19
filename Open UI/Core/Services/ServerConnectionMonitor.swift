@@ -56,6 +56,17 @@ final class ServerConnectionMonitor: @unchecked Sendable {
     /// Uses a debounce so transient blips don't flash the overlay.
     var isShowingOverlay: Bool = false
 
+    /// Other saved servers the user could switch to.
+    /// Set by `AppDependencyContainer.startServerConnectionMonitor()`.
+    /// Used by `ConnectionOverlayView` to offer a "Switch Server" escape hatch.
+    var otherAvailableServers: [ServerConfig] = []
+
+    /// `true` when at least one other saved server has a cached token,
+    /// meaning a switch would succeed even without internet.
+    var canSwitchServer: Bool {
+        !otherAvailableServers.isEmpty
+    }
+
     // MARK: - Private State
 
     private let logger = Logger(subsystem: "com.openui", category: "ConnectionMonitor")

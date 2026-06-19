@@ -734,21 +734,33 @@ struct RootView: View {
             switch viewModel.phase {
             case .authenticated:
                 // Optimistic auth — chat view is already rendered underneath the overlay.
-                // Validate token silently, then fade the overlay away.
-                await viewModel.validateSessionInBackground()
+                // Fire-and-forget background validation — do NOT await, so the overlay
+                // dismisses immediately and the user never sees a stuck loading screen.
+                Task { await viewModel.validateSessionInBackground() }
+                // Pre-fetch models while the overlay is still on screen (max 3 s).
+                // This ensures the toolbar is fully populated on the very first frame
+                // the user sees after the overlay fades — no "New Chat" → "Select Model"
+                // → "Haiku" three-step pop-in on cold launch.
+                await dependencies.activeChatStore.prewarmModels(using: dependencies)
                 dismissLaunchOverlay()
+
             case .restoringSession:
-                // Have token but no cached user — restore first, then fade away.
-                await viewModel.restoreSession()
-                // Only dismiss if restore succeeded (phase changed to .authenticated).
-                // If it failed, errorMessage will be set and overlay shows the error UI.
-                if viewModel.phase == .authenticated {
-                    dismissLaunchOverlay()
+                // Token exists but no cached user — restore session with a hard 6 s
+                // timeout so the launch screen is never permanently stuck.
+                // Whether the restore succeeds or times out, we always dismiss the
+                // overlay; if it failed the ConnectionMonitor will surface its overlay.
+                await viewModel.withAuthTimeout(seconds: 6) {
+                    await viewModel.restoreSession()
+                    return ()
                 }
-                // Error path: overlay stays visible and switches to the error UI.
+                // Pre-fetch models while overlay is still visible so first frame is clean.
+                await dependencies.activeChatStore.prewarmModels(using: dependencies)
+                dismissLaunchOverlay()
+
             case .authMethodSelection:
                 await viewModel.fetchBackendConfigIfNeeded()
                 dismissLaunchOverlay()
+
             default:
                 dismissLaunchOverlay()
             }
@@ -861,8 +873,14 @@ struct RootView: View {
             }
         }
         .overlay {
-            // Connection lost overlay — blocks interaction when server/internet is down
-            ConnectionOverlayView(monitor: dependencies.connectionMonitor)
+            // Connection lost overlay — blocks interaction when server/internet is down.
+            // Passes a "Switch Server" callback so the user is never stuck when the
+            // current server is down but other saved servers are available.
+            ConnectionOverlayView(monitor: dependencies.connectionMonitor) {
+                withAnimation {
+                    viewModel.phase = .serverSwitcher
+                }
+            }
         }
         .task {
             // Start the connection monitor once the user is authenticated.

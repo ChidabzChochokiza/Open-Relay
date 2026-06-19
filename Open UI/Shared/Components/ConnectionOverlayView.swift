@@ -6,8 +6,15 @@ import SwiftUI
 /// to avoid flickering on transient blips. Blocks user interaction with the
 /// app content behind it, and automatically dismisses when the connection
 /// is restored.
+///
+/// When the current server is unreachable and other saved servers exist,
+/// a "Switch Server" button is shown so the user is never fully stuck.
 struct ConnectionOverlayView: View {
     let monitor: ServerConnectionMonitor
+
+    /// Called when the user taps "Switch Server".
+    /// The caller should transition `AuthViewModel.phase` to `.serverSwitcher`.
+    var onSwitchServer: (() -> Void)? = nil
 
     @Environment(\.theme) private var theme
 
@@ -49,6 +56,26 @@ struct ConnectionOverlayView: View {
                         Text(formattedElapsed(since: since))
                             .scaledFont(size: 12)
                             .foregroundStyle(.white.opacity(0.5))
+                    }
+
+                    // "Switch Server" escape hatch — only when current server is down
+                    // (not internet down) and the user has other saved servers.
+                    if monitor.connectionState == .serverDown,
+                       monitor.canSwitchServer,
+                       let onSwitchServer {
+                        Button(action: onSwitchServer) {
+                            Label("Switch Server", systemImage: "arrow.left.arrow.right.circle")
+                                .scaledFont(size: 14, weight: .medium)
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, Spacing.lg)
+                                .padding(.vertical, Spacing.sm)
+                                .background(
+                                    Capsule()
+                                        .fill(.white.opacity(0.18))
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(Text("Switch to a different server"))
                     }
                 }
                 .padding(Spacing.xl)

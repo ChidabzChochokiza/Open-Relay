@@ -182,10 +182,40 @@ struct MainChatView: View {
         return min(0, max(-drawerWidth, combined))
     }
 
-    /// Drawer open fraction (0 = fully closed, 1 = fully open) — drives dimming opacity.
+    /// Drawer open fraction (0 = fully closed, 1 = fully open) — drives push animation.
     private var drawerFraction: CGFloat {
         let fraction = (effectiveDrawerX + drawerWidth) / drawerWidth
         return min(1, max(0, fraction))
+    }
+
+    /// How far the main content card is pushed right as the drawer opens.
+    private var mainContentOffset: CGFloat {
+        drawerFraction * drawerWidth
+    }
+
+    /// How far the main content card is pushed left as the file browser opens.
+    private var fileBrowserContentOffset: CGFloat {
+        fileBrowserFraction * fileBrowserWidth
+    }
+
+    /// Net X offset of the main content card — pushed right by drawer, left by file browser.
+    private var combinedContentOffset: CGFloat {
+        mainContentOffset - fileBrowserContentOffset
+    }
+
+    /// Highest open fraction of either panel — drives scale and corner radius.
+    private var maxPanelFraction: CGFloat {
+        max(drawerFraction, fileBrowserFraction)
+    }
+
+    /// Scale applied to the main content card (1.0 → 0.92) based on most-open panel.
+    private var combinedContentScale: CGFloat {
+        1.0 - (maxPanelFraction * 0.08)
+    }
+
+    /// Corner radius of the main content card (0 → 16) based on most-open panel.
+    private var combinedContentCornerRadius: CGFloat {
+        maxPanelFraction * 16
     }
 
     // MARK: File Browser Computed Properties (right-side panel, mirrors drawer)
@@ -239,80 +269,80 @@ struct MainChatView: View {
     @ViewBuilder
     private func mainZStack(voiceCallBinding: Binding<Bool>) -> some View {
         ZStack(alignment: .leading) {
-            // MARK: Main chat content
+            // MARK: Main chat content — pushed right as drawer opens (Reddit/Twitter style)
             NavigationStack {
                 chatContent
                     .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .topBarLeading) {
-                            Button {
-                                toggleDrawer()
-                            } label: {
-                                Image(systemName: "line.3.horizontal")
-                                    .scaledFont(size: 14, weight: .medium)
-                                    .foregroundStyle(theme.textSecondary)
-                                    .frame(width: 34, height: 34)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Menu")
-                        }
-
-                        ToolbarItem(placement: .principal) {
-                            if activeChannelId == nil {
-                                modelSelector
-                            }
-                        }
-
-                        ToolbarItem(placement: .topBarTrailing) {
-                            if activeChannelId == nil {
-                                Button {
-                                    startNewChat()
-                                } label: {
-                                    Image(systemName: "square.and.pencil")
-                                        .scaledFont(size: 14, weight: .medium)
-                                        .foregroundStyle(theme.textSecondary)
-                                        .frame(width: 34, height: 34)
-                                        .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel("New Chat")
-                            }
-                        }
-                    }
                     .toolbarBackground(.hidden, for: .navigationBar)
             }
-            .ignoresSafeArea(.keyboard)
-            .allowsHitTesting(drawerFraction < 0.01 && !isDraggingDrawer && !isDraggingFileBrowser)
-
-            // MARK: Dimming overlay
-            Color.black
-                .opacity(0.4 * drawerFraction)
-                .ignoresSafeArea()
-                .allowsHitTesting(drawerFraction > 0.01)
-                .onTapGesture {
-                    closeDrawerAnimated()
-                }
-                .gesture(
-                    DragGesture(minimumDistance: 12, coordinateSpace: .local)
-                        .onChanged { value in
-                            let horizontal = value.translation.width
-                            guard horizontal < 0 else { return }
-                            isDraggingDrawer = true
-                            dragOffset = horizontal
-                        }
-                        .onEnded { value in
-                            guard isDraggingDrawer else { return }
-                            let horizontal = value.translation.width
-                            let velocity = value.velocity.width
-                            isDraggingDrawer = false
-                            if horizontal < -(drawerWidth * 0.3) || velocity < -500 {
+            .ignoresSafeArea(.keyboard, edges: .bottom)
+            // Push the content card — right by drawer, left by file browser
+            .offset(x: combinedContentOffset)
+            .scaleEffect(combinedContentScale, anchor: .center)
+            .clipShape(RoundedRectangle(cornerRadius: combinedContentCornerRadius, style: .continuous))
+            // Blur the main content as panels open
+            .blur(radius: maxPanelFraction * 8)
+            // Shadow on the active edge: left when drawer open, right when file browser open
+            .shadow(color: .black.opacity(0.18 * drawerFraction), radius: 20, x: -4)
+            .shadow(color: .black.opacity(0.18 * fileBrowserFraction), radius: 20, x: 4)
+            // Faint scrim proportional to whichever panel is most open
+            .overlay {
+                Color.black
+                    .opacity(0.12 * maxPanelFraction)
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+            }
+            // Unified tap/swipe-to-close overlay — active whenever either panel is open
+            // OR a drag is in progress. Enabling this as a separate overlay layer means
+            // the open-drag gesture on the NavigationStack is never cancelled by
+            // hitting its own interaction-blocking (the old .allowsHitTesting pattern).
+            .overlay {
+                if maxPanelFraction > 0.01 || isDraggingDrawer || isDraggingFileBrowser {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            if drawerFraction >= fileBrowserFraction {
                                 closeDrawerAnimated()
                             } else {
-                                openDrawerAnimated()
+                                closeFileBrowserAnimated()
                             }
                         }
-                )
+                        .gesture(
+                            DragGesture(minimumDistance: 12, coordinateSpace: .local)
+                                .onChanged { value in
+                                    let h = value.translation.width
+                                    if drawerFraction >= fileBrowserFraction {
+                                        guard h < 0 else { return }
+                                        isDraggingDrawer = true
+                                        dragOffset = h
+                                    } else {
+                                        guard h > 0 else { return }
+                                        isDraggingFileBrowser = true
+                                        fileBrowserDragOffset = h
+                                    }
+                                }
+                                .onEnded { value in
+                                    let h = value.translation.width
+                                    let v = value.velocity.width
+                                    if isDraggingDrawer {
+                                            isDraggingDrawer = false
+                                            if h < -(drawerWidth * 0.15) || v < -300 {
+                                                closeDrawerAnimated()
+                                            } else {
+                                                openDrawerAnimated()
+                                            }
+                                        } else if isDraggingFileBrowser {
+                                            isDraggingFileBrowser = false
+                                            if h > fileBrowserWidth * 0.15 || v > 300 {
+                                                closeFileBrowserAnimated()
+                                            } else {
+                                                openFileBrowserAnimated()
+                                            }
+                                        }
+                                }
+                        )
+                }
+            }
 
             // MARK: Drawer
             drawerContent
@@ -332,7 +362,7 @@ struct MainChatView: View {
                             let horizontal = value.translation.width
                             let velocity = value.velocity.width
                             isDraggingDrawer = false
-                            if horizontal < -(drawerWidth * 0.3) || velocity < -500 {
+                            if horizontal < -(drawerWidth * 0.15) || velocity < -300 {
                                 closeDrawerAnimated()
                             } else {
                                 openDrawerAnimated()
@@ -340,37 +370,9 @@ struct MainChatView: View {
                         }
                 )
 
-            // MARK: File browser dimming overlay (right side — only when terminal is active)
+            // MARK: File browser panel (right side — only when terminal is active)
             if isTerminalActiveInCurrentChat {
-            Color.black
-                .opacity(0.4 * fileBrowserFraction)
-                .ignoresSafeArea()
-                .allowsHitTesting(fileBrowserFraction > 0.01)
-                .onTapGesture {
-                    closeFileBrowserAnimated()
-                }
-                .gesture(
-                    DragGesture(minimumDistance: 12, coordinateSpace: .local)
-                        .onChanged { value in
-                            let horizontal = value.translation.width
-                            guard horizontal > 0 else { return }
-                            isDraggingFileBrowser = true
-                            fileBrowserDragOffset = horizontal
-                        }
-                        .onEnded { value in
-                            guard isDraggingFileBrowser else { return }
-                            let horizontal = value.translation.width
-                            let velocity = value.velocity.width
-                            isDraggingFileBrowser = false
-                            if horizontal > fileBrowserWidth * 0.3 || velocity > 500 {
-                                closeFileBrowserAnimated()
-                            } else {
-                                openFileBrowserAnimated()
-                            }
-                        }
-                )
-
-            // MARK: File browser panel (right side)
+            // Note: no separate dim overlay — the unified overlay on NavigationStack handles tap/swipe.
             TerminalBrowserView(
                 viewModel: terminalBrowserVM,
                 onDismiss: { closeFileBrowserAnimated() }
@@ -402,7 +404,7 @@ struct MainChatView: View {
                         let horizontal = value.translation.width
                         let velocity = value.velocity.width
                         isDraggingFileBrowser = false
-                        if horizontal > fileBrowserWidth * 0.3 || velocity > 500 {
+                        if horizontal > fileBrowserWidth * 0.15 || velocity > 300 {
                             closeFileBrowserAnimated()
                         } else {
                             openFileBrowserAnimated()
@@ -411,11 +413,12 @@ struct MainChatView: View {
             )
             } // end if isTerminalActiveInCurrentChat
 
+
             // MARK: Left edge overlay — exclusively captures left-edge swipe to open drawer.
-            // Sits on top of the NavigationStack so it intercepts touches before they
-            // reach background content. Uses .gesture() (not .simultaneousGesture) so
-            // background taps/scrolls cannot fire during the drag.
-            if !showDrawer {
+            // Mirrors the right-edge file browser strip exactly. Only shown when drawer is
+            // closed and file browser is not being dragged. This completely decouples the
+            // open-drawer gesture from the NavigationStack, eliminating scroll-view conflicts.
+            if !showDrawer && !isDraggingFileBrowser {
                 Color.clear
                     .frame(width: 20)
                     .frame(maxHeight: .infinity)
@@ -425,7 +428,7 @@ struct MainChatView: View {
                             .onChanged { value in
                                 let horizontal = value.translation.width
                                 let vertical = abs(value.translation.height)
-                                guard horizontal > vertical else { return }
+                                guard abs(horizontal) > vertical, horizontal > 0 else { return }
                                 if !isDraggingDrawer {
                                     UIApplication.shared.sendAction(
                                         #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
@@ -438,7 +441,7 @@ struct MainChatView: View {
                                 let horizontal = value.translation.width
                                 let velocity = value.velocity.width
                                 isDraggingDrawer = false
-                                if horizontal > drawerWidth * 0.4 || velocity > 500 {
+                                if horizontal > drawerWidth * 0.2 || velocity > 300 {
                                     openDrawerAnimated()
                                 } else {
                                     closeDrawerAnimated()
@@ -1288,6 +1291,8 @@ struct MainChatView: View {
                 viewModel: dependencies.activeChatStore.viewModel(for: conversationId)
             )
             .onDeleteChat { startNewChat() }
+            .onToggleDrawer { toggleDrawer() }
+            .onNewChat { startNewChat() }
             .id(conversationId)
         } else if let folderWorkspaceId = activeFolderWorkspaceId {
             // Folder workspace: new chat screen locked to this folder.
@@ -1300,6 +1305,8 @@ struct MainChatView: View {
                 viewModel: vm,
                 folderWorkspace: folder
             )
+            .onToggleDrawer { toggleDrawer() }
+            .onNewChat { startNewChat() }
             .id("folder-workspace-\(folderWorkspaceId)-\(newChatGeneration)")
             .onAppear {
                 // Set folder context on the VM so new chats are created in this folder
@@ -1317,6 +1324,8 @@ struct MainChatView: View {
             ChatDetailView(
                 viewModel: dependencies.activeChatStore.viewModel(for: nil)
             )
+            .onToggleDrawer { toggleDrawer() }
+            .onNewChat { startNewChat() }
             .id("new-chat-\(newChatGeneration)")
         }
     }
@@ -2156,6 +2165,7 @@ struct MainChatView: View {
                 .buttonStyle(.plain)
             } else {
                 Button {
+                    dependencies.activeChatStore.prewarm(conversationId: conversation.id, using: dependencies)
                     activeConversationId = conversation.id
                     activeChannelId = nil  // Clear channel when opening a chat
                     activeFolderWorkspaceId = nil  // Clear folder highlight when opening a regular chat
@@ -2744,10 +2754,14 @@ let conversationId: String?
     var body: some View {
         Group {
             if vm.availableModels.isEmpty {
-                Text("New Chat")
+                let fallbackName = activeChatStore.cachedModels.first(where: {
+                    $0.id == activeChatStore.cachedDefaultModelId
+                })?.shortName ?? "New Chat"
+                Text(fallbackName)
                     .scaledFont(size: 14, weight: .medium)
                     .foregroundStyle(theme.textPrimary)
                     .lineLimit(1)
+                    .animation(nil, value: fallbackName)
             } else {
                 Button {
                     Haptics.play(.light)

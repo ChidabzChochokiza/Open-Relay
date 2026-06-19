@@ -586,6 +586,13 @@ final class ChatViewModel {
     /// Weak reference to the shared store — used to write back model cache.
     private weak var activeChatStore: ActiveChatStore?
 
+    /// `true` after `configure()` has been called at least once.
+    ///
+    /// Used by `ActiveChatStore.prewarm()` and `ChatDetailView.onAppear` to
+    /// avoid redundant re-configuration when the view model has already been
+    /// wired up (e.g. pre-warmed before navigation).
+    private(set) var isConfigured: Bool = false
+
     func configure(with manager: ConversationManager, socket: SocketIOService? = nil, store: ActiveChatStore? = nil, asr: OnDeviceASRService? = nil, notes: NotesManager? = nil) {
         self.manager = manager
         self.notesManager = notes
@@ -593,6 +600,7 @@ final class ChatViewModel {
         self.serverBaseURL = manager.baseURL
         self.activeChatStore = store
         self.asrService = asr
+        isConfigured = true
         setupRetryAttachmentObserver()
         setupMemorySettingObserver()
         setupMessageQueueSettingObserver()

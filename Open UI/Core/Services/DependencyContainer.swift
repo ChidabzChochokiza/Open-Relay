@@ -143,6 +143,43 @@ final class ActiveChatStore {
         if let selectedId { cachedSelectedModelId = selectedId }
     }
 
+    /// Pre-configures the view model for `conversationId` (or a new chat when
+    /// `nil`) so that it is fully wired up before `ChatDetailView` renders for
+    /// the first time.  Calling this on navigation-row tap eliminates the
+    /// toolbar / model-selector pop-in caused by deferred `.task` setup.
+    ///
+    /// Safe to call multiple times — `ChatViewModel.isConfigured` prevents
+    /// redundant work.
+    func prewarm(conversationId: String?, using dependencies: AppDependencyContainer) {
+        let vm = viewModel(for: conversationId)
+        guard !vm.isConfigured, let manager = dependencies.conversationManager else { return }
+        vm.configure(
+            with: manager,
+            socket: dependencies.socketService,
+            store: self,
+            asr: dependencies.asrService
+        )
+    }
+
+    /// Pre-fetches models for the new-chat VM so the model selector is already
+    /// populated when the launch overlay fades on cold launch.
+    ///
+    /// Called from `RootView.task` before `dismissLaunchOverlay()` — while the
+    /// overlay is still covering the screen, so the user never sees an empty state.
+    /// Bounded by `timeout` seconds so it can never delay the overlay indefinitely.
+    /// No-ops immediately if models are already cached from a previous fetch.
+    func prewarmModels(using dependencies: AppDependencyContainer, timeout: Double = 3) async {
+        guard cachedModels.isEmpty else { return }
+        prewarm(conversationId: nil, using: dependencies)
+        let vm = viewModel(for: nil)
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await vm.loadModels() }
+            group.addTask { try? await Task.sleep(for: .seconds(timeout)) }
+            _ = await group.next()
+            group.cancelAll()
+        }
+    }
+
     /// Removes the cached view model for a conversation that has finished.
     func remove(_ conversationId: String?) {
         viewModels.removeValue(forKey: conversationId ?? "__new__")
@@ -560,11 +597,19 @@ final class AppDependencyContainer: ServiceContainer {
     }
 
     /// Starts the ``ServerConnectionMonitor`` for the current API client.
+    /// Also populates `otherAvailableServers` so the overlay can offer a
+    /// "Switch Server" escape hatch when the current server is unreachable.
     /// Called after `configureServicesForActiveServer()` and when authentication succeeds.
     func startServerConnectionMonitor() {
         guard let client = apiClient else {
             connectionMonitor.stop()
             return
+        }
+        // Populate alternate servers: all saved servers that are NOT the current
+        // active one and have a saved auth token (so switching is instant).
+        let activeURL = serverConfigStore.activeServer?.url
+        connectionMonitor.otherAvailableServers = serverConfigStore.servers.filter {
+            $0.url != activeURL && KeychainService.shared.hasToken(forServer: $0.url)
         }
         connectionMonitor.start(apiClient: client, socketService: socketService)
     }

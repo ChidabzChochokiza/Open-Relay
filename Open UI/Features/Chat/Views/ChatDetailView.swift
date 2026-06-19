@@ -218,6 +218,26 @@ struct ChatDetailView: View {
         return copy
     }
 
+    /// Optional callback invoked when the hamburger menu button is tapped.
+    /// When set, a hamburger icon is shown at the leading edge of the custom top bar.
+    private var toggleDrawerAction: (() -> Void)?
+
+    func onToggleDrawer(_ action: @escaping () -> Void) -> ChatDetailView {
+        var copy = self
+        copy.toggleDrawerAction = action
+        return copy
+    }
+
+    /// Optional callback invoked when the new-chat button is tapped.
+    /// When set, a compose icon is shown at the trailing edge of the custom top bar.
+    private var newChatAction: (() -> Void)?
+
+    func onNewChat(_ action: @escaping () -> Void) -> ChatDetailView {
+        var copy = self
+        copy.newChatAction = action
+        return copy
+    }
+
     // MARK: - Body
 
     var body: some View {
@@ -227,14 +247,18 @@ struct ChatDetailView: View {
             theme.background.ignoresSafeArea()
             messageListArea
         }
-        // Fill the status-bar / nav-bar region with the correct background color
-        // so that when the nav bar is hidden there is no black gap at the top.
-        // frame(height:0) + ignoresSafeArea(.top) expands upward into the safe area
-        // without pushing any content down.
+        // Custom top bar replaces the system navigation bar entirely.
+        // Using safeAreaInset reserves the correct amount of layout space so
+        // the scroll content is never hidden underneath the bar.  When
+        // navBarHidden is true the bar slides up via offset() and the reserved
+        // height collapses to 0 — both in a single coordinated animation so
+        // the two layers (background + icons) always move as one unit.
         .safeAreaInset(edge: .top, spacing: 0) {
-            theme.background
-                .frame(height: 0)
-                .ignoresSafeArea(edges: .top)
+            customTopBar
+                .frame(height: navBarHidden ? 0 : nil)
+                .offset(y: navBarHidden ? -56 : 0)
+                .clipped()
+                .animation(.easeInOut(duration: 0.22), value: navBarHidden)
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if editingMessageId != nil {
@@ -243,10 +267,21 @@ struct ChatDetailView: View {
                 inputFieldArea(vm: vm)
             }
         }
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar { toolbarContent }
-        .toolbarVisibility(navBarHidden ? .hidden : .visible, for: .navigationBar)
-        .toolbarBackground(.hidden, for: .navigationBar)
+        .navigationBarHidden(true)
+        // Configure the view model synchronously on first appearance so that the
+        // toolbar (model selector, terminal icon) is fully populated before the
+        // very first render.  The `isConfigured` guard prevents a second call if
+        // `ActiveChatStore.prewarm()` already ran before navigation.
+        .onAppear {
+            guard !viewModel.isConfigured, let manager = dependencies.conversationManager else { return }
+            viewModel.configure(
+                with: manager,
+                socket: dependencies.socketService,
+                store: dependencies.activeChatStore,
+                asr: dependencies.asrService,
+                notes: dependencies.notesManager
+            )
+        }
         .task { await handleViewTask() }
         // Reactive fallback: if backendConfig wasn't ready when .task ran
         // (first app launch), rebuild prompts as soon as the config arrives.
@@ -493,54 +528,82 @@ struct ChatDetailView: View {
         .applyDeleteChatConfirmation(isPresented: $showDeleteChatConfirm, onDelete: performDeleteChat)
     }
 
-    // MARK: - Toolbar
+    // MARK: - Custom top bar (replaces system nav bar to avoid split-layer hide/show bug)
 
-    @ToolbarContentBuilder
-    private var toolbarContent: some ToolbarContent {
-        ToolbarItem(placement: .principal) {
-            HStack(spacing: Spacing.sm) {
+    // MARK: - Custom top bar
+
+    private var customTopBar: some View {
+        HStack(spacing: Spacing.sm) {
+            // Leading: hamburger — large circle pill matching image 2
+            if let drawerAction = toggleDrawerAction {
+                Button {
+                    drawerAction()
+                } label: {
+                    Image(systemName: "line.3.horizontal")
+                        .scaledFont(size: 18, weight: .medium)
+                        .foregroundStyle(theme.textSecondary)
+                        .frame(width: 46, height: 46)
+                        .background(theme.surfaceContainer, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .contentShape(Circle())
+                .accessibilityLabel("Menu")
+            }
+
+            // Center: model selector + optional temp-chat badge
+            HStack(spacing: Spacing.xs) {
                 modelSelectorButton
                 if viewModel.isTemporaryChat {
                     Image(systemName: "eye.slash.fill")
-                        .scaledFont(size: 12, weight: .semibold)
+                        .scaledFont(size: 11, weight: .semibold)
                         .foregroundStyle(theme.warning)
                 }
             }
-            // Force SwiftUI to fully re-layout the toolbar principal slot when
-            // the selected model changes. Without this, the toolbar caches the
-            // intrinsic width from the previous (possibly longer) model name
-            // and never shrinks back even when a shorter name is selected.
             .id(viewModel.selectedModelId ?? "none")
+            .frame(maxWidth: .infinity)
+
+            // Trailing: all action icons in one grouped pill (matching image 2)
+            trailingActionsPill
         }
-        ToolbarItemGroup(placement: .topBarTrailing) {
-            Button {
+        .padding(.horizontal, Spacing.sm)
+        .padding(.vertical, 8)
+        .background(theme.background)
+    }
+
+    /// All trailing action icons grouped into a single rounded-rect pill, matching the original design.
+    @ViewBuilder
+    private var trailingActionsPill: some View {
+        HStack(spacing: 0) {
+            // New chat
+            if let newChat = newChatAction {
+                pillIconButton(icon: "square.and.pencil", accessibilityLabel: "New Chat") {
+                    newChat()
+                }
+            }
+
+            // Chat parameters
+            pillIconButton(
+                icon: "slider.horizontal.3",
+                tint: (viewModel.conversation?.chatParams != nil || viewModel.pendingChatParams != nil) ? theme.brandPrimary : nil,
+                accessibilityLabel: "Chat parameters"
+            ) {
                 Haptics.play(.light)
                 isShowingChatParams = true
-            } label: {
-                Image(systemName: "slider.horizontal.3")
-                    .scaledFont(size: 13, weight: .medium)
-                    .foregroundStyle((viewModel.conversation?.chatParams != nil || viewModel.pendingChatParams != nil) ? theme.brandPrimary : theme.textTertiary)
-                    .frame(width: 34, height: 34)
-                    .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Chat parameters")
+
+            // Temporary chat toggle (new chats only)
             if viewModel.messages.isEmpty {
-                Button {
-                    withAnimation(MicroAnimation.snappy) {
-                        viewModel.isTemporaryChat.toggle()
-                    }
+                pillIconButton(
+                    icon: viewModel.isTemporaryChat ? "eye.slash.fill" : "eye",
+                    tint: viewModel.isTemporaryChat ? theme.warning : nil,
+                    accessibilityLabel: viewModel.isTemporaryChat ? "Temporary chat on" : "Temporary chat off"
+                ) {
+                    withAnimation(MicroAnimation.snappy) { viewModel.isTemporaryChat.toggle() }
                     Haptics.play(.light)
-                } label: {
-                    Image(systemName: viewModel.isTemporaryChat ? "eye.slash.fill" : "eye")
-                        .scaledFont(size: 13, weight: .medium)
-                        .foregroundStyle(viewModel.isTemporaryChat ? theme.warning : theme.textTertiary)
-                        .frame(width: 34, height: 34)
-                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(viewModel.isTemporaryChat ? "Temporary chat on" : "Temporary chat off")
             }
+
+            // Save temporary chat (active temp chats with messages)
             if viewModel.isTemporaryChat && !viewModel.messages.isEmpty {
                 Button {
                     Haptics.play(.medium)
@@ -555,25 +618,24 @@ struct ChatDetailView: View {
                         } else {
                             ZStack {
                                 Circle()
-                                    .strokeBorder(
-                                        style: StrokeStyle(lineWidth: 1.5, dash: [3, 2])
-                                    )
+                                    .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [3, 2]))
                                     .foregroundStyle(theme.brandPrimary)
-                                    .frame(width: 18, height: 18)
+                                    .frame(width: 16, height: 16)
                                 Image(systemName: "checkmark")
-                                    .scaledFont(size: 9, weight: .bold)
+                                    .scaledFont(size: 8, weight: .bold)
                                     .foregroundStyle(theme.brandPrimary)
                             }
                         }
                     }
-                    .frame(width: 34, height: 34)
-                    .contentShape(Rectangle())
+                    .frame(width: 40, height: 40)
                 }
                 .buttonStyle(.plain)
+                .contentShape(Rectangle())
                 .disabled(viewModel.isSavingTemporaryChat)
                 .accessibilityLabel("Save as permanent chat")
             }
-            // ··· overflow menu
+
+            // Overflow menu
             if viewModel.conversation != nil || !viewModel.messages.isEmpty {
                 Menu {
                     if viewModel.conversation != nil {
@@ -585,14 +647,36 @@ struct ChatDetailView: View {
                     }
                 } label: {
                     Image(systemName: "ellipsis")
-                        .scaledFont(size: 13, weight: .medium)
-                        .foregroundStyle(theme.textTertiary)
-                        .frame(width: 34, height: 34)
-                        .contentShape(Rectangle())
+                        .scaledFont(size: 16, weight: .medium)
+                        .foregroundStyle(theme.textSecondary)
+                        .frame(width: 40, height: 40)
                 }
                 .buttonStyle(.plain)
+                .contentShape(Rectangle())
             }
         }
+        .background(theme.surfaceContainer, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+    }
+
+    /// Icon button for use inside the trailing grouped pill.
+    @ViewBuilder
+    private func pillIconButton(
+        icon: String,
+        tint: Color? = nil,
+        accessibilityLabel: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button {
+            action()
+        } label: {
+            Image(systemName: icon)
+                .scaledFont(size: 16, weight: .medium)
+                .foregroundStyle(tint ?? theme.textSecondary)
+                .frame(width: 40, height: 40)
+        }
+        .buttonStyle(.plain)
+        .contentShape(Rectangle())
+        .accessibilityLabel(accessibilityLabel)
     }
 
     private var modelSelectorButton: some View {
@@ -1253,13 +1337,23 @@ struct ChatDetailView: View {
 
             let distanceFromBottom = max(0,
                 viewState_contentHeight - newOffset.y - viewState_containerHeight)
-            if distanceFromBottom <= 80 {
+
+            // Detect rubber-band bounce zones so that the spring-back from over-scrolling
+            // at either end never triggers nav-bar reactions or isScrolledUp toggling.
+            // Top bounce: contentOffset.y goes negative. Bottom bounce: goes past maxOffset.
+            let maxScrollOffset = max(0, viewState_contentHeight - viewState_containerHeight)
+            let isBouncing = newOffset.y < 0 || (maxScrollOffset > 0 && newOffset.y > maxScrollOffset)
+
+            if distanceFromBottom <= 80 && !isBouncing {
                 // Scrolled to within 80pt of the bottom — re-engage auto-scroll and hide FABs.
+                // !isBouncing guard: during a bottom bounce newOffset.y overshoots maxScrollOffset,
+                // which clamps distanceFromBottom to 0 — without this guard it fires isScrolledUp=false
+                // which triggers scrollTo(edge:.bottom) via onChange and causes the "fighting" sensation.
                 if isScrolledUp {
                     isScrolledUp = false
                     userMessageJumpIndex = nil
                 }
-            } else if isUserDriving && distanceFromBottom > 80 {
+            } else if isUserDriving && distanceFromBottom > 80 && !isBouncing {
                 // User's finger (or inertia) is actively driving the scroll view —
                 // the ONLY condition under which auto-scroll is allowed to disengage.
                 // Guard 1: distanceFromBottom > 80 prevents the over-scroll elastic bounce
@@ -1296,7 +1390,7 @@ struct ChatDetailView: View {
             // Freeze nav bar during streaming — every streaming auto-scroll fires offset
             // changes that would otherwise toggle the nav bar, causing the visible
             // pop-in/pop-out the user reported. Only respond to genuine user drags.
-            if !navSuppressed && isUserDriving && !viewModel.isStreaming {
+            if !navSuppressed && isUserDriving && !viewModel.isStreaming && !isBouncing {
                 if distanceFromBottom > 80 {
                     if navDelta > 1 && !navBarHidden {
                         // Scrolling down (away from bottom) — hide
@@ -1486,6 +1580,7 @@ struct ChatDetailView: View {
                         }
                     }
                     .buttonStyle(.plain)
+                    .contentShape(Rectangle())
                     .accessibilityLabel("Jump to previous question")
 
                     // Hairline divider between the two halves
@@ -1516,6 +1611,7 @@ struct ChatDetailView: View {
                     }
                 }
                 .buttonStyle(.plain)
+                .contentShape(Rectangle())
                 .accessibilityLabel("Scroll to bottom")
             }
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -2951,7 +3047,10 @@ struct ChatDetailView: View {
         // Start keyboard tracking FIRST so the bottom inset is
         // correct for the very first layout pass (D9 fix).
         keyboard.start()
-        if let manager = dependencies.conversationManager {
+        // Configure only when not already done by .onAppear or ActiveChatStore.prewarm().
+        // .onAppear fires synchronously on the first render pass and covers the
+        // toolbar/model-selector pop-in; this guard prevents a redundant second call.
+        if !viewModel.isConfigured, let manager = dependencies.conversationManager {
             viewModel.configure(with: manager, socket: dependencies.socketService, store: dependencies.activeChatStore, asr: dependencies.asrService, notes: dependencies.notesManager)
         }
         // Perform non-async setup before awaiting load() so the UI

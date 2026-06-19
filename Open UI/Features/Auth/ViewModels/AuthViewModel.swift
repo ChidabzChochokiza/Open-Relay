@@ -1358,14 +1358,20 @@ final class AuthViewModel {
     // MARK: - Multi-Server Management
 
     /// Switches the active server to the given config, tears down existing services,
-    /// and attempts to restore the saved session for the new server.
+    /// and restores the saved session for the new server.
+    ///
+    /// **Offline-safe design**: the switch never hangs the UI regardless of
+    /// network availability.
     ///
     /// Flow:
-    /// 1. Save current user metadata to the outgoing server config.
-    /// 2. Stop timers / disconnect socket for the old server.
-    /// 3. Activate the new server in the store.
-    /// 4. Rebuild all dependent services via `dependencies?.configureServicesForActiveServer`.
-    /// 5. Attempt session restore from Keychain for the new server.
+    /// 1. Persist outgoing-server metadata; tear down socket/services.
+    /// 2. Activate the new server and rebuild all dependent services.
+    /// 3. Resolve auth state using only cached data (no blocking network call):
+    ///    - Cached user → set `.authenticated` immediately; validate in background
+    ///      (fire-and-forget, no await). If WiFi is dead the app is still usable.
+    ///    - Token only → attempt session restore with a **6 s hard timeout**; if it
+    ///      fails / times out, transition to `.authMethodSelection` gracefully.
+    ///    - No token → transition to `.authMethodSelection` with no network call.
     func switchToServer(_ config: ServerConfig) async {
         logger.info("🔀 Switching to server: \(config.url)")
 
@@ -1406,27 +1412,71 @@ final class AuthViewModel {
         // 3. Rebuild all services for the new server
         dependencies?.configureServicesForActiveServer(isServerSwitch: true)
 
-        // 4. Try to restore the saved session for this server
+        // 4. Resolve auth state — never block the UI on a network call
         let hasToken = KeychainService.shared.hasToken(forServer: config.url)
 
         if hasToken {
-            // Check for a cached user for instant display while validating
             if let cachedUser = Self.loadCachedUser(forServer: config.url) {
+                // Optimistic auth: show the chat UI immediately from the cache.
+                // Validate asynchronously in the background — if WiFi is dead the
+                // ConnectionMonitor will surface the server-down overlay instead of
+                // hanging the launch screen indefinitely.
                 currentUser = cachedUser
                 phase = .authenticated
-                // Validate in background — same optimistic-auth pattern as app launch
-                await validateSessionInBackground()
+                Task { [weak self] in await self?.validateSessionInBackground() }
             } else {
+                // Token exists but no cached user — restore session with a hard
+                // 6 s timeout so the loading screen never hangs permanently.
                 phase = .restoringSession
-                await restoreSession()
+                let restored = await withAuthTimeout(seconds: 6) { [weak self] in
+                    await self?.restoreSession()
+                    return await MainActor.run { [weak self] in self?.phase == .authenticated } ?? false
+                }
+                if restored != true {
+                    // Timed out or failed — fall through to auth screen so the user
+                    // is never permanently stuck on the loading logo.
+                    logger.warning("🔀 Session restore timed out or failed — falling back to auth screen")
+                    phase = .authMethodSelection
+                    errorMessage = String(localized: "Could not reach the server. Please sign in again or check your connection.")
+                }
             }
         } else {
-            // No saved token — need to authenticate fresh
-            await ensureBackendConfig()
+            // No saved token — navigate straight to auth without any network call.
             phase = .authMethodSelection
         }
 
         logger.info("🔀 Server switch complete — phase=\(String(describing: self.phase))")
+    }
+
+    // MARK: - Async Timeout Utility
+
+    /// Runs `operation` with a hard timeout of `seconds`.
+    ///
+    /// Returns the operation's result if it completes in time, or `nil` if the
+    /// timeout fires first.  The operation task is cancelled on timeout.
+    ///
+    /// - Parameters:
+    ///   - seconds: Maximum allowed duration before the operation is cancelled.
+    ///   - operation: An async closure that returns a `Sendable` value.
+    /// - Returns: The operation's return value, or `nil` on timeout.
+    @discardableResult
+    func withAuthTimeout<T: Sendable>(
+        seconds: Double,
+        operation: @escaping @Sendable () async -> T
+    ) async -> T? {
+        await withTaskGroup(of: T?.self) { group in
+            group.addTask {
+                await operation()
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(seconds))
+                return nil
+            }
+            // Take the first result — either the operation's value or nil (timeout)
+            let result = await group.next() ?? nil
+            group.cancelAll()
+            return result
+        }
     }
 
     /// Removes a saved server entirely (from the list, Keychain, and disk).

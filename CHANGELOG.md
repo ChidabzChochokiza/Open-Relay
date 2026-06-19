@@ -1,5 +1,16 @@
 # Changelog
 
+## v4.11.1 — June 19, 2026
+
+### Improvements
+- Smoother app start
+- Some QOL visual improvements
+
+### Bug Fixes
+- Fixed app getting permanently stuck on the loading screen while offline.
+- Fixed math formatting
+- Fixed LaTeX commands silently failing to render.
+
 ## v4.11 — June 16, 2026
 
 ### What's New
