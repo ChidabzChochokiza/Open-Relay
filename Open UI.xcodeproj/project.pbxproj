@@ -31,6 +31,8 @@
 		38AD615D2FAB1946007725CE /* MarkdownView in Frameworks */ = {isa = PBXBuildFile; productRef = 38AD615C2FAB1946007725CE /* MarkdownView */; };
 		38B6DED52FA55DDC001924FB /* MarkdownParser in Frameworks */ = {isa = PBXBuildFile; productRef = 38B6DED42FA55DDC001924FB /* MarkdownParser */; };
 		38B6DED72FA55DDC001924FB /* MarkdownView in Frameworks */ = {isa = PBXBuildFile; productRef = 38B6DED62FA55DDC001924FB /* MarkdownView */; };
+		38C7F9142FEEEA67001C94A0 /* MarkdownParser in Frameworks */ = {isa = PBXBuildFile; productRef = 38C7F9132FEEEA67001C94A0 /* MarkdownParser */; };
+		38C7F9162FEEEA67001C94A0 /* MarkdownView in Frameworks */ = {isa = PBXBuildFile; productRef = 38C7F9152FEEEA67001C94A0 /* MarkdownView */; };
 		38FEA3182FA2A18600A98F25 /* MLXAudioCore in Frameworks */ = {isa = PBXBuildFile; productRef = 38FEA3172FA2A18600A98F25 /* MLXAudioCore */; };
 		38FEA31A2FA2A18600A98F25 /* MLXAudioSTT in Frameworks */ = {isa = PBXBuildFile; productRef = 38FEA3192FA2A18600A98F25 /* MLXAudioSTT */; };
 		38FEA31C2FA2A18600A98F25 /* MLXAudioTTS in Frameworks */ = {isa = PBXBuildFile; productRef = 38FEA31B2FA2A18600A98F25 /* MLXAudioTTS */; };
@@ -158,11 +160,13 @@
 				38AD615D2FAB1946007725CE /* MarkdownView in Frameworks */,
 				3879DA8E2FE7D4BC0064E527 /* MarkdownView in Frameworks */,
 				3879DA8C2FE7D4BC0064E527 /* MarkdownParser in Frameworks */,
+				38C7F9142FEEEA67001C94A0 /* MarkdownParser in Frameworks */,
 				3890E2912F9845C10011D505 /* MarkdownView in Frameworks */,
 				38AA00012FA9B00000MRMAID /* BeautifulMermaid in Frameworks */,
 				3800ST012F00000000ST001 /* SwiftTerm in Frameworks */,
 				388C02F92FB5131C0098FB4F /* MarkdownView in Frameworks */,
 				387CA40E2F882523000B5152 /* MarkdownParser in Frameworks */,
+				38C7F9162FEEEA67001C94A0 /* MarkdownView in Frameworks */,
 				388C02EF2FB44BD60098FB4F /* MarkdownView in Frameworks */,
 				388C02ED2FB44BD60098FB4F /* MarkdownParser in Frameworks */,
 				38FEA31A2FA2A18600A98F25 /* MLXAudioSTT in Frameworks */,
@@ -278,6 +282,8 @@
 				3879DA8D2FE7D4BC0064E527 /* MarkdownView */,
 				3879DA902FE7D4ED0064E527 /* MarkdownParser */,
 				3879DA922FE7D4ED0064E527 /* MarkdownView */,
+				38C7F9132FEEEA67001C94A0 /* MarkdownParser */,
+				38C7F9152FEEEA67001C94A0 /* MarkdownView */,
 			);
 			productName = "Open UI";
 			productReference = 38EB667D2F39CE5A00AED774 /* Open UI.app */;
@@ -344,7 +350,7 @@
 				38754A952F845BE60012CD28 /* XCRemoteSwiftPackageReference "ReactionContextMenu" */,
 				3800STREF2F00000000ST00F /* XCRemoteSwiftPackageReference "SwiftTerm" */,
 				38FEA3162FA2A18600A98F25 /* XCRemoteSwiftPackageReference "mlx-audio-swift" */,
-				3879DA8F2FE7D4ED0064E527 /* XCLocalSwiftPackageReference "../MarkdownView" */,
+				38C7F9122FEEEA67001C94A0 /* XCRemoteSwiftPackageReference "MarkdownView" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 38EB667E2F39CE5A00AED774 /* Products */;
@@ -800,13 +806,6 @@
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCLocalSwiftPackageReference section */
-		3879DA8F2FE7D4ED0064E527 /* XCLocalSwiftPackageReference "../MarkdownView" */ = {
-			isa = XCLocalSwiftPackageReference;
-			relativePath = ../MarkdownView;
-		};
-/* End XCLocalSwiftPackageReference section */
-
 /* Begin XCRemoteSwiftPackageReference section */
 		3800STREF2F00000000ST00F /* XCRemoteSwiftPackageReference "SwiftTerm" */ = {
 			isa = XCRemoteSwiftPackageReference;
@@ -830,6 +829,14 @@
 			requirement = {
 				kind = upToNextMajorVersion;
 				minimumVersion = 0.1.0;
+			};
+		};
+		38C7F9122FEEEA67001C94A0 /* XCRemoteSwiftPackageReference "MarkdownView" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/Ichigo3766/MarkdownView.git";
+			requirement = {
+				branch = main;
+				kind = branch;
 			};
 		};
 		38FEA3162FA2A18600A98F25 /* XCRemoteSwiftPackageReference "mlx-audio-swift" */ = {
@@ -928,6 +935,16 @@
 		};
 		38B6DED62FA55DDC001924FB /* MarkdownView */ = {
 			isa = XCSwiftPackageProductDependency;
+			productName = MarkdownView;
+		};
+		38C7F9132FEEEA67001C94A0 /* MarkdownParser */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 38C7F9122FEEEA67001C94A0 /* XCRemoteSwiftPackageReference "MarkdownView" */;
+			productName = MarkdownParser;
+		};
+		38C7F9152FEEEA67001C94A0 /* MarkdownView */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 38C7F9122FEEEA67001C94A0 /* XCRemoteSwiftPackageReference "MarkdownView" */;
 			productName = MarkdownView;
 		};
 		38FEA3172FA2A18600A98F25 /* MLXAudioCore */ = {
