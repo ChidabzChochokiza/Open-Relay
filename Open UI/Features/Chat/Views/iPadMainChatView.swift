@@ -2286,6 +2286,16 @@ private extension View {
                     }
                 }
             }
+            .onReceive(NotificationCenter.default.publisher(for: .openUINavigateToChat)) { notification in
+                // openui://chat/<id> deep link — select the requested conversation.
+                // Works both on warm launch (app running) and after cold-start restore
+                // (SharedDataService was already updated before this notification fired).
+                if let conversationId = notification.object as? String {
+                    activeConversationId.wrappedValue = conversationId
+                    activeChannelId.wrappedValue = nil
+                    SharedDataService.shared.saveLastActiveConversationId(conversationId)
+                }
+            }
             .onReceive(NotificationCenter.default.publisher(for: .openUIDismissOverlays)) { _ in
                 // Quick action requested — dismiss any active sheet/cover so
                 // the new action doesn't stack on top of the old one.

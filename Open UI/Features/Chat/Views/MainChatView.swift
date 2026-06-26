@@ -1033,6 +1033,16 @@ struct MainChatView: View {
                     }
                 }
             }
+            .onReceive(NotificationCenter.default.publisher(for: .openUINavigateToChat)) { notification in
+                // openui://chat/<id> deep link — select the requested conversation.
+                // Works both on warm launch (app running) and after cold-start restore
+                // (SharedDataService was already updated before this notification fired).
+                if let conversationId = notification.object as? String {
+                    activeConversationId = conversationId
+                    activeChannelId = nil
+                    SharedDataService.shared.saveLastActiveConversationId(conversationId)
+                }
+            }
             .onReceive(NotificationCenter.default.publisher(for: .navigateToChannel)) { notification in
                 if let channelId = notification.object as? String {
                     activeChannelId = channelId
@@ -2777,18 +2787,22 @@ let conversationId: String?
                                 authToken: vm.serverAuthToken
                             )
                             .fixedSize()
+                            .id(model.id)
+                            .transition(.opacity)
                         }
                         Text(vm.selectedModel?.shortName ?? "Select Model")
                             .scaledFont(size: 14, weight: .medium)
                             .foregroundStyle(theme.textPrimary)
                             .lineLimit(1)
                             .truncationMode(.tail)
+                            .contentTransition(.opacity)
                         Image(systemName: "chevron.down")
                             .scaledFont(size: 10, weight: .semibold)
                             .foregroundStyle(theme.textTertiary)
                             .fixedSize()
                             .layoutPriority(1)
                     }
+                    .animation(MicroAnimation.gentle, value: vm.selectedModelId)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
                     .background(
@@ -2821,7 +2835,9 @@ let conversationId: String?
                             vm.togglePinModel(modelId)
                         },
                         onSelect: { model in
-                            vm.selectModel(model.id)
+                            withAnimation(MicroAnimation.gentle) {
+                                vm.selectModel(model.id)
+                            }
                         }
                     )
                     .environment(dependencies)

@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 import AVFoundation
 import QuickLook
 import MarkdownView
+import Litext
 import os.log
 
 // MARK: - Pump Rate-Limiter
@@ -554,7 +555,7 @@ struct ChatDetailView: View {
             HStack(spacing: Spacing.xs) {
                 modelSelectorButton
             }
-            .id(viewModel.selectedModelId ?? "none")
+            .animation(MicroAnimation.gentle, value: viewModel.selectedModelId)
             .frame(maxWidth: .infinity)
 
             // Trailing: all action icons in one grouped pill (matching image 2)
@@ -697,6 +698,8 @@ struct ChatDetailView: View {
                                 authToken: viewModel.serverAuthToken
                             )
                             .fixedSize()
+                            .id(model.id)
+                            .transition(.opacity)
                         }
                         Text(viewModel.selectedModel?.shortName ?? String(localized: "Select Model"))
                             .scaledFont(size: 14, weight: .medium)
@@ -704,6 +707,7 @@ struct ChatDetailView: View {
                             .lineLimit(1)
                             .truncationMode(.tail)
                             .layoutPriority(0)
+                            .contentTransition(.opacity)
                         Image(systemName: "chevron.down")
                             .scaledFont(size: 10, weight: .semibold)
                             .foregroundStyle(theme.textTertiary)
@@ -1151,15 +1155,23 @@ struct ChatDetailView: View {
         ZStack {
             scrollContent
 
-            // Welcome screen — shown when no messages and not loading
+            // Welcome screen — shown when no messages and not loading.
+            // The .transition(.opacity) + .animation on messages.isEmpty makes
+            // the welcome screen (with starter prompt cards) gently crossfade out
+            // as the first message's chat view fades in — instead of an abrupt cut.
             if !viewModel.isLoadingConversation && viewModel.messages.isEmpty {
-                if let folder = _folderWorkspace {
-                    folderWelcomeView(folder: folder)
-                } else {
-                    welcomeView
+                Group {
+                    if let folder = _folderWorkspace {
+                        folderWelcomeView(folder: folder)
+                    } else {
+                        welcomeView
+                    }
                 }
+                .transition(.opacity)
             }
         }
+        .animation(MicroAnimation.gentle, value: viewModel.messages.isEmpty)
+
         // FAB overlay — attached pill group: ↑ (top half) + ↓ (bottom half) when scrolled away from bottom.
         // Both appear together as one unit. ↑ is hidden when already at the very top.
         .overlay(alignment: .bottomTrailing) {
@@ -1205,12 +1217,12 @@ struct ChatDetailView: View {
             if isScrolledUp && isAssistantAddition && !viewModel.isStreaming { return }
 
             // Capture whether the user was scrolled up BEFORE resetting the flag.
-            // If they were already at the bottom, .defaultScrollAnchor(.bottom) will
-            // anchor new content automatically — issuing a redundant scrollTo(edge:.bottom)
-            // with animation fights the anchor and causes a visible jump/shift.
             let wasScrolledUp = isScrolledUp
             isScrolledUp = false
             isUserDriving = false
+            // Arm suppression window so the spring scroll's deceleration phase
+            // never falsely sets isScrolledUp = true via the offset observer.
+            _pumpRef.programmaticScrollUntil = Date().addingTimeInterval(0.5)
 
             if old == 0 {
                 // Brief delay so the welcome view swap and initial layout settle.
@@ -1309,19 +1321,10 @@ struct ChatDetailView: View {
         }
         .background(ScrollViewHorizontalLock())
         .scrollIndicators(.hidden)
-        .scrollDismissesKeyboard(editingMessageId != nil ? .never : .interactively)
+        .scrollDismissesKeyboard(editingMessageId != nil ? .never : (viewModel.isStreaming ? .immediately : .interactively))
         .defaultScrollAnchor(.bottom)
         .scrollPosition($scrollPosition)
-        // Detect scroll position to show/hide FAB + auto-load pagination
-        // Track whether the user's finger (or inertia) is driving the scroll view.
-        // This is the single gate that allows auto-scroll to disengage:
-        // layout reflows, WKWebView resizes, and programmatic scrolls never
-        // emit .interacting — they emit .animating or .idle.
         .onScrollPhaseChange { _, newPhase in
-            // Only count actual finger contact as user-driven. Excluding .decelerating
-            // prevents programmatic scrollTo() animations finishing their deceleration
-            // from falsely setting isUserDriving = true, which was racing with the
-            // offset observer to incorrectly flip isScrolledUp = true and kill auto-scroll.
             isUserDriving = (newPhase == .interacting || newPhase == .decelerating)
         }
         .onScrollGeometryChange(for: CGPoint.self) { geo in
@@ -1332,10 +1335,6 @@ struct ChatDetailView: View {
 
             let distanceFromBottom = max(0,
                 viewState_contentHeight - newOffset.y - viewState_containerHeight)
-
-            // Detect rubber-band bounce zones so that the spring-back from over-scrolling
-            // at either end never triggers nav-bar reactions or isScrolledUp toggling.
-            // Top bounce: contentOffset.y goes negative. Bottom bounce: goes past maxOffset.
             let maxScrollOffset = max(0, viewState_contentHeight - viewState_containerHeight)
             let isBouncing = newOffset.y < 0 || (maxScrollOffset > 0 && newOffset.y > maxScrollOffset)
 
@@ -1348,18 +1347,17 @@ struct ChatDetailView: View {
                     isScrolledUp = false
                     userMessageJumpIndex = nil
                 }
-            } else if isUserDriving && distanceFromBottom > 80 && !isBouncing {
+            } else if isUserDriving && !isBouncing {
                 // User's finger (or inertia) is actively driving the scroll view —
                 // the ONLY condition under which auto-scroll is allowed to disengage.
-                // Guard 1: distanceFromBottom > 80 prevents the over-scroll elastic bounce
-                // at the bottom from briefly toggling isScrolledUp (which caused jitter
-                // and the FABs flashing momentarily when bouncing off the bottom).
-                // Guard 2: only set isScrolledUp when actually scrolling UP (offset decreasing).
-                // A programmatic scrollTo(bottom) from the ↓ FAB briefly enters .decelerating
-                // (isUserDriving = true) while still far from the bottom — without this guard
-                // it immediately re-shows the FABs even though we're heading to the bottom.
-                let isScrollingUp = newOffset.y < oldOffset.y
-                if isScrollingUp && !isScrolledUp { isScrolledUp = true }
+                // !isBouncing already covers the rubber-band over-scroll zones (top/bottom),
+                // so no distance gate is needed — any genuine upward drag breaks auto-scroll
+                // instantly, even a tiny one. This makes the breakout feel immediate rather
+                // than requiring the user to fight/scroll >80pt against the streaming pump.
+                // Require a small delta (>2pt) so sub-pixel layout reflow/settling noise
+                // never falsely trips the breakout.
+                let upwardDelta = oldOffset.y - newOffset.y
+                if upwardDelta > 2 && !isScrolledUp { isScrolledUp = true }
             }
             // All other cases (layout reflows, programmatic scrolls, WKWebView resizes)
             // emit .animating/.idle → isUserDriving is false → no state change.
@@ -1498,6 +1496,9 @@ struct ChatDetailView: View {
                 // Short linear glide (~0.1s) smooths the per-line-quantum height jumps
                 // (~20pt each) without accumulating lag behind the text. Linear (not easeOut)
                 // ensures consecutive line-wraps chain into one continuous uniform slide.
+                // Arm suppression window so the animation's deceleration phase never
+                // falsely flips isScrolledUp = true via the offset observer.
+                _pumpRef.programmaticScrollUntil = Date().addingTimeInterval(0.15)
                 withAnimation(.linear(duration: 0.1)) {
                     scrollPosition.scrollTo(edge: .bottom)
                 }
@@ -1590,9 +1591,20 @@ struct ChatDetailView: View {
                     userMessageJumpIndex = nil
                     windowEnd = nil
                     windowSize = min(maxWindowSize, viewModel.messages.count)
-                    _pumpRef.programmaticScrollUntil = Date().addingTimeInterval(0.5)
-                    withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) {
+                    if viewModel.isStreaming {
+                        // During streaming, DON'T use a spring animation.
+                        // A 0.45s spring fights the per-token linear pump (which fires
+                        // many times per second) — they cancel each other out and the
+                        // viewport barely moves. Instead, snap instantly to the bottom
+                        // with a tiny suppression window (0.1s), then hand off to the
+                        // pump which will keep the viewport pinned to the live tail.
+                        _pumpRef.programmaticScrollUntil = Date().addingTimeInterval(0.1)
                         scrollPosition.scrollTo(edge: .bottom)
+                    } else {
+                        _pumpRef.programmaticScrollUntil = Date().addingTimeInterval(0.5)
+                        withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) {
+                            scrollPosition.scrollTo(edge: .bottom)
+                        }
                     }
                     Haptics.play(.light)
                 } label: {
@@ -2364,10 +2376,12 @@ struct ChatDetailView: View {
     @ViewBuilder
     private func promptCard(_ prompt: SuggestedPrompt) -> some View {
         Button {
-            viewModel.inputText = prompt.fullText
-            Task { await viewModel.sendMessage() }
+            // Send the prompt directly without populating the bound input field —
+            // this avoids the text briefly flashing in the input box before send.
             Haptics.play(.light)
+            Task { await viewModel.sendMessage(directText: prompt.fullText) }
         } label: {
+
             VStack(alignment: .leading, spacing: 5) {
                 Text(prompt.title)
                     .scaledFont(size: 14, weight: .semibold)
@@ -3066,10 +3080,6 @@ struct ChatDetailView: View {
             viewModel.conversationId ?? viewModel.conversation?.id
         await viewModel.load()
         // After messages load, pin the window to the latest messages.
-        // Do NOT issue a programmatic scrollTo here — defaultScrollAnchor(.bottom)
-        // already places the view at the bottom on first layout, and a redundant
-        // scrollTo after a sleep fights WKWebView / code-block height settling
-        // and produces the visible "bounce" the user reported (A1 fix).
         let loadedCount = viewModel.messages.count
         if loadedCount > 0 {
             isScrolledUp = false
@@ -3083,6 +3093,17 @@ struct ChatDetailView: View {
             // via JS postMessage without triggering scroll position jumps
             // (A3 fix, extended for lazy WKWebView init).
             _pumpRef.lastScrollTime = Date().addingTimeInterval(0.5)
+            // Scroll to bottom after load so that re-opened chats always start at
+            // the latest message. The .onAppear scrollTo (in messageListArea) fires
+            // before content height is known when the VM already has cached messages,
+            // making it a no-op. onChange(of: messages.count) never fires because the
+            // cached VM's count didn't change. A short settle delay matches the same
+            // approach used in the first-open (old == 0) branch of onChange(of: messages.count).
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 150_000_000) // 150ms layout settle
+                _pumpRef.programmaticScrollUntil = Date().addingTimeInterval(0.4)
+                scrollPosition.scrollTo(edge: .bottom)
+            }
         }
         await viewModel.fetchPinnedModels()
         // Rebuild prompts after load() — models are now fetched with fresh
@@ -3883,7 +3904,12 @@ private struct IsolatedStreamingStatus: View {
         let effectiveStatusHistory = isActiveStore
             ? streamingStore.streamingStatusHistory
             : message.statusHistory
-        let effectiveIsStreaming = isActiveStore || message.isStreaming
+        // Single source of truth: only the live streaming store gates streaming UI.
+        // message.isStreaming is a server/persistence flag — using it here created
+        // a second "streaming" path when navigating back to a chat mid-stream,
+        // showing stale/partial statusHistory from the server instead of the
+        // live store's real-time history.
+        let effectiveIsStreaming = isActiveStore
 
         if !effectiveStatusHistory.isEmpty {
             let visible = effectiveStatusHistory.filter { $0.hidden != true }
@@ -3966,7 +3992,11 @@ private struct IsolatedAssistantMessage: View {
             return Self.preprocessCitations(resolved, sources: effectiveSources, preferDomain: preferDomain)
         }()
 
-        let effectiveIsStreaming = isActivelyStreaming || message.isStreaming
+        // Single source of truth: ONLY the live StreamingPipeline gates streaming
+        // display. `message.isStreaming` is a server/persistence flag and must NOT
+        // be used as a display-path selector — doing so creates a second competing
+        // render path when the user navigates away and back mid-stream.
+        let effectiveIsStreaming = isActivelyStreaming
 
         if effectiveIsStreaming && rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             // Wrap in HStack+Spacer to pin the indicator to the leading edge.

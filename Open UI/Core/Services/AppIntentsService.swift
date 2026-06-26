@@ -209,6 +209,11 @@ extension Notification.Name {
     // Posted after a successful account switch so MainChatView/iPadMainChatView
     // immediately reload conversations, folders, and channels for the new account.
     static let openUIAccountSwitched = Notification.Name("com.openui.accountSwitched")
+    // Deep link: open a specific existing conversation by ID.
+    // `object` is the conversation ID string.
+    // Used by openui://chat/<id> so external sources (Home Assistant, Shortcuts, etc.)
+    // can land the user directly in a specific chat.
+    static let openUINavigateToChat = Notification.Name("com.openui.navigateToChat")
 }
 
 // MARK: - Shortcut Donation Helper

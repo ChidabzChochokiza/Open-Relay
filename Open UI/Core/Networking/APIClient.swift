@@ -1723,22 +1723,37 @@ final class APIClient: @unchecked Sendable {
 
     // MARK: - Prompts
 
+    /// Fetches all prompts, paging through every page until exhausted.
+    /// New servers return paginated `{"items": [...], "total": N}`; older
+    /// servers return a flat array (all items in one response).
     func getPrompts() async throws -> [[String: Any]] {
-        let (data, _) = try await network.requestRaw(
-            path: "/api/v1/prompts/list",
-            queryItems: [URLQueryItem(name: "page", value: "1")]
-        )
-        let json = try JSONSerialization.jsonObject(with: data)
-        // New server versions return paginated {"items": [...], "total": N}
-        if let dict = json as? [String: Any], let items = dict["items"] as? [[String: Any]] {
-            return items
+        var allItems: [[String: Any]] = []
+        var page = 1
+        let maxPages = 100  // safety cap to avoid an infinite loop
+
+        while page <= maxPages {
+            let (data, _) = try await network.requestRaw(
+                path: "/api/v1/prompts/list",
+                queryItems: [URLQueryItem(name: "page", value: "\(page)")]
+            )
+            let json = try JSONSerialization.jsonObject(with: data)
+
+            if let dict = json as? [String: Any], let items = dict["items"] as? [[String: Any]] {
+                // Paginated response — accumulate and continue until a page is empty.
+                if items.isEmpty { break }
+                allItems.append(contentsOf: items)
+                if let total = dict["total"] as? Int, allItems.count >= total { break }
+                page += 1
+            } else if let array = json as? [[String: Any]] {
+                // Legacy flat array — everything is returned at once.
+                return array
+            } else {
+                break
+            }
         }
-        // Fallback: old flat array response
-        if let array = json as? [[String: Any]] {
-            return array
-        }
-        return []
+        return allItems
     }
+
 
     func getPromptTags() async throws -> [String] {
         let (data, _) = try await network.requestRaw(path: "/api/v1/prompts/tags")
@@ -1965,15 +1980,28 @@ final class APIClient: @unchecked Sendable {
 
     // MARK: - Skills
 
-    /// GET /api/v1/skills/list?page=1 — returns paginated {items, total}
+    /// GET /api/v1/skills/list?page=N — returns paginated {items, total}.
+    /// Pages through every page until exhausted so all skills are returned,
+    /// not just the first page (~30 items).
     func getSkills() async throws -> [SkillItem] {
-        let json = try await network.requestJSON(
-            path: "/api/v1/skills/list",
-            queryItems: [URLQueryItem(name: "page", value: "1")]
-        )
-        let items = json["items"] as? [[String: Any]] ?? []
-        return items.compactMap { SkillItem(json: $0) }
+        var allItems: [[String: Any]] = []
+        var page = 1
+        let maxPages = 100  // safety cap to avoid an infinite loop
+
+        while page <= maxPages {
+            let json = try await network.requestJSON(
+                path: "/api/v1/skills/list",
+                queryItems: [URLQueryItem(name: "page", value: "\(page)")]
+            )
+            let items = json["items"] as? [[String: Any]] ?? []
+            if items.isEmpty { break }
+            allItems.append(contentsOf: items)
+            if let total = json["total"] as? Int, allItems.count >= total { break }
+            page += 1
+        }
+        return allItems.compactMap { SkillItem(json: $0) }
     }
+
 
     /// GET /api/v1/skills/id/{id} — returns full skill including content field
     func getSkillDetail(id: String) async throws -> SkillDetail {

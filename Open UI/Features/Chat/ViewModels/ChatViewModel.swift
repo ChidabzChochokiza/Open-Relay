@@ -252,6 +252,11 @@ final class ChatViewModel {
     /// Guards against flooding syncForExternalStream with duplicate fetch tasks
     /// when many socket tokens arrive before the first fetch completes.
     private var isSyncingExternalStream: Bool = false
+    /// Tracks the accumulated content for the currently externally-streaming message.
+    /// Delta events are incremental, so we accumulate them here and feed the full
+    /// cumulative string into streamingStore.updateContent() on each token — matching
+    /// exactly what the self-initiated ContentAccumulator does.
+    private var externalStreamAccumulatedContent: String = ""
     private(set) var sessionId: String = UUID().uuidString
     private let logger = Logger(subsystem: "com.openui", category: "ChatViewModel")
     private var hasFinishedStreaming = false
@@ -1147,6 +1152,16 @@ final class ChatViewModel {
             if let localIdx = conversation!.messages.firstIndex(where: { $0.id == serverMsg.id }) {
                 // Message exists locally — update only changed fields in-place
                 let local = conversation!.messages[localIdx]
+
+                // GUARD: Skip ALL display-relevant field updates for the message
+                // currently live in the StreamingPipeline. StreamingContentStore
+                // is the single authoritative source for content/isStreaming/statusHistory
+                // during active streaming. Letting adoptServerMessages() overwrite these
+                // fields would cause the "navigate away and back" bug where a second
+                // stale display path activates via message.isStreaming == true.
+                let isCurrentlyInPipeline = streamingStore.streamingMessageId == serverMsg.id
+                    && streamingStore.isActive
+                if isCurrentlyInPipeline { continue }
 
                 // GUARD: During active streaming, do NOT overwrite content of
                 // already-completed (non-streaming) assistant messages. The server
@@ -2218,35 +2233,40 @@ final class ChatViewModel {
                 return
             }
 
-            // Message exists — append content directly (real-time socket streaming)
+            // Message exists — route through the StreamingContentStore pipeline
+            // so tokens get the same typewriter/drain effect as self-initiated streams.
             if !isExternallyStreaming {
                 isExternallyStreaming = true
                 isStreaming = true
                 // Reset hasFinishedStreaming for each new external stream session
                 hasFinishedStreaming = false
-                logger.info("External stream: first token for message \(msgId)")
+                externalStreamAccumulatedContent = ""
+                // Begin the streaming store for this message (activates drain pipeline).
+                let modelId = conversation?.messages.first(where: { $0.id == msgId })?.model
+                    ?? selectedModelId
+                streamingStore.beginStreaming(messageId: msgId, modelId: modelId)
+                logger.info("External stream: first token for message \(msgId), routing via StreamingContentStore")
             }
-            if let index = conversation?.messages.firstIndex(where: { $0.id == msgId }) {
-                if isReplace {
-                    // Full content replacement (message, chat:message, replace, chat:completion fallback)
-                    conversation?.messages[index].content = contentDelta
-                } else {
-                    // Delta/token append (chat:message:delta, chat:completion choices.delta)
-                    conversation?.messages[index].content += contentDelta
-                }
-                conversation?.messages[index].isStreaming = true
+
+            // Accumulate content (delta or replace) then push full accumulated
+            // string into the store — exactly like ContentAccumulator does.
+            if isReplace {
+                externalStreamAccumulatedContent = contentDelta
+            } else {
+                externalStreamAccumulatedContent += contentDelta
             }
+            updateAssistantMessage(id: msgId, content: externalStreamAccumulatedContent, isStreaming: true)
 
             // Also check for done signal within content events (chat:completion
             // can carry both content AND done:true in the same event)
             if type == "chat:completion", let payload, payload["done"] as? Bool == true {
-                let finalContent = conversation?.messages.first(where: { $0.id == msgId })?.content ?? ""
+                let finalContent = externalStreamAccumulatedContent
                 isExternallyStreaming = false
-                isStreaming = false
                 isSyncingExternalStream = false
-                if let index = conversation?.messages.firstIndex(where: { $0.id == msgId }) {
-                    conversation?.messages[index].isStreaming = false
-                }
+                externalStreamAccumulatedContent = ""
+                // Route through the drain-deferral path — isStreaming is cleared
+                // inside the onDrained callback after all buffered tokens are displayed.
+                updateAssistantMessage(id: msgId, content: finalContent, isStreaming: false)
                 let chatId = conversationId ?? conversation?.id
                 Task {
                     await self.sendCompletionNotificationIfNeeded(content: finalContent)
@@ -2265,15 +2285,16 @@ final class ChatViewModel {
 
         // Handle done signal (when no content in the event)
         if type == "chat:completion", let payload, payload["done"] as? Bool == true {
-            let finalContent = messageId.flatMap { id in
-                conversation?.messages.first(where: { $0.id == id })?.content
-            } ?? ""
+            let msgId = messageId ?? streamingStore.streamingMessageId
+            let finalContent = externalStreamAccumulatedContent.isEmpty
+                ? (msgId.flatMap { id in conversation?.messages.first(where: { $0.id == id })?.content } ?? "")
+                : externalStreamAccumulatedContent
             isExternallyStreaming = false
-            isStreaming = false
             isSyncingExternalStream = false
-            if let msgId = messageId,
-               let index = conversation?.messages.firstIndex(where: { $0.id == msgId }) {
-                conversation?.messages[index].isStreaming = false
+            externalStreamAccumulatedContent = ""
+            // Route through drain-deferral so typewriter finishes before UI resets.
+            if let msgId {
+                updateAssistantMessage(id: msgId, content: finalContent, isStreaming: false)
             }
             // Final sync to pick up complete content, files, sources
             let chatId = conversationId ?? conversation?.id
@@ -2294,12 +2315,14 @@ final class ChatViewModel {
         // Handle errors and cancellation
         if type == "chat:message:error" || type == "chat:tasks:cancel" {
             isExternallyStreaming = false
-                isStreaming = false
             isSyncingExternalStream = false
-            if let msgId = messageId,
-               let index = conversation?.messages.firstIndex(where: { $0.id == msgId }) {
-                conversation?.messages[index].isStreaming = false
+            externalStreamAccumulatedContent = ""
+            // Abort the streaming store (no drain needed for errors)
+            if let msgId = messageId ?? streamingStore.streamingMessageId,
+               streamingStore.streamingMessageId == msgId {
+                _ = streamingStore.abortStreaming()
             }
+            cleanupStreaming()
             return
         }
     }
@@ -2314,11 +2337,13 @@ final class ChatViewModel {
             let serverConversation = try await manager.fetchConversation(id: chatId)
             adoptServerMessages(serverConversation: serverConversation)
 
-            // After syncing, mark the target message as streaming
-            if let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) {
-                conversation?.messages[index].isStreaming = true
+            // After syncing, begin routing tokens through the StreamingContentStore pipeline
+            if conversation?.messages.first(where: { $0.id == messageId }) != nil {
+                externalStreamAccumulatedContent = ""
+                let modelId = conversation?.messages.first(where: { $0.id == messageId })?.model ?? selectedModelId
+                streamingStore.beginStreaming(messageId: messageId, modelId: modelId)
             }
-            logger.info("External stream: synced messages, now tracking \(messageId)")
+            logger.info("External stream: synced messages, now tracking \(messageId) via pipeline")
         } catch {
             logger.warning("External stream sync failed: \(error.localizedDescription)")
         }
@@ -2420,11 +2445,20 @@ final class ChatViewModel {
                     let content = lastAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines)
                     if content.isEmpty || lastAssistant.isStreaming {
                         isExternallyStreaming = true
-                isStreaming = true
-                        if let index = conversation?.messages.firstIndex(where: { $0.id == lastAssistant.id }) {
-                            conversation?.messages[index].isStreaming = true
+                        isStreaming = true
+                        // Route through the pipeline instead of directly marking isStreaming.
+                        // Seed the accumulator with any existing partial content so incoming
+                        // delta tokens are appended to the correct base rather than starting empty.
+                        if !streamingStore.isActive {
+                            externalStreamAccumulatedContent = lastAssistant.content
+                            streamingStore.beginStreaming(
+                                messageId: lastAssistant.id,
+                                modelId: lastAssistant.model ?? selectedModelId)
+                            if !lastAssistant.content.isEmpty {
+                                streamingStore.updateContent(lastAssistant.content)
+                            }
                         }
-                        logger.info("Detected active external stream on chat open")
+                        logger.info("Detected active external stream on chat open — routing via StreamingContentStore")
                     }
                 }
             }
@@ -2504,9 +2538,14 @@ final class ChatViewModel {
 
     // MARK: - Sending Messages
 
-    func sendMessage() async {
-        let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// Sends a message. When `directText` is provided (e.g. tapping a suggested
+    /// starter prompt), that text is used directly and is NOT written to the
+    /// bound `inputText` — this avoids the prompt briefly flashing in the input
+    /// field before being sent.
+    func sendMessage(directText: String? = nil) async {
+        let text = (directText ?? inputText).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !attachments.isEmpty else { return }
+
 
         // If message queue is enabled and we're currently streaming, enqueue the text
         // (only text messages can be queued — attachments are sent normally when not streaming)

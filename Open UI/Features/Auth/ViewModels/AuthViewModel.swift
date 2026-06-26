@@ -1430,7 +1430,7 @@ final class AuthViewModel {
                 phase = .restoringSession
                 let restored = await withAuthTimeout(seconds: 6) { [weak self] in
                     await self?.restoreSession()
-                    return await MainActor.run { [weak self] in self?.phase == .authenticated } ?? false
+                    return await MainActor.run { [weak self] in self?.phase == .authenticated }
                 }
                 if restored != true {
                     // Timed out or failed — fall through to auth screen so the user

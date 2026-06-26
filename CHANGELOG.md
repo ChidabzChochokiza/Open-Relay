@@ -1,5 +1,18 @@
 # Changelog
 
+## v4.11.2 — June 26, 2026
+
+### Improvements
+- Many underlying markdown library improvements.
+- Smoother animations across various interactions.
+
+### Bug Fixes
+- Fixed Workspace Skills list only showing 30 skills — now loads all skills across all pages.
+- Fixed reopening a previous chat not scrolling to the bottom — the chat now always opens at the latest message.
+- Fixed cross-device streaming now showing the same typewriter effect as self-initiated streams instead of tokens popping in abruptly.
+- Fixed navigating away and back to a chat mid-stream showing a garbled or duplicated display instead of the live response.
+- Fixed `openui://chat/<id>` deep links not navigating to the specified conversation when the app is already open.
+
 ## v4.11.1 — June 19, 2026
 
 ### Improvements

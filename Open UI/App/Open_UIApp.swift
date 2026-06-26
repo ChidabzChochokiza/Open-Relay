@@ -358,13 +358,22 @@ struct Open_UIApp: App {
 
         case "chat":
             // openui://chat/{conversationId}
-            // FIX: Validate conversation ID format before navigating to prevent
-            // malicious deep links from causing confusing UX.
+            // FIX: Post a NotificationCenter notification so MainChatView /
+            // iPadMainChatView can set their local activeConversationId state directly.
+            // router.navigate(to: .chatDetail(...)) only pushes onto the NavigationStack
+            // path which these views don't observe for active-conversation selection,
+            // so it had no visible effect (issue #117).
             let conversationId = url.pathComponents.last ?? ""
             if !conversationId.isEmpty && conversationId != "/"
                 && conversationId.count >= 8 && conversationId.count <= 128
                 && conversationId.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }) {
-                router.navigate(to: .chatDetail(conversationId: conversationId))
+                // Persist so cold-start restore also lands in the right chat.
+                SharedDataService.shared.saveLastActiveConversationId(conversationId)
+                // Delay matches other deep-link notifications (camera-chat etc.) so the
+                // .onReceive handlers are registered before the notification fires.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    NotificationCenter.default.post(name: .openUINavigateToChat, object: conversationId)
+                }
             }
 
         case "note":
