@@ -67,7 +67,34 @@ final class ChatViewModel {
         }
     }
     var selectedModelId: String?
-    var isStreaming: Bool = false
+    var isStreaming: Bool = false {
+        didSet {
+            // Signal any awaiter (e.g. VoiceCallViewModel) that streaming has started.
+            // Fires exactly once when isStreaming transitions false → true.
+            if isStreaming && !oldValue {
+                streamingStartedContinuation?.resume()
+                streamingStartedContinuation = nil
+            }
+        }
+    }
+    /// Continuation fulfilled the first time `isStreaming` becomes `true` after
+    /// `waitForStreamingToStart()` is called. Cleared immediately after signalling
+    /// to avoid retaining a stale continuation across calls.
+    private var streamingStartedContinuation: CheckedContinuation<Void, Never>?
+
+    /// Suspends until `isStreaming` becomes `true` (i.e. the server has accepted the
+    /// request and the first token is flowing). Returns immediately if already streaming.
+    ///
+    /// This is used by `VoiceCallViewModel` to avoid the race where the
+    /// content-polling loop in `waitForResponseAndSpeak()` would see `isStreaming == false`
+    /// (because the server hasn't responded yet) and skip TTS entirely for the first message.
+    func waitForStreamingToStart() async {
+        guard !isStreaming else { return }
+        await withCheckedContinuation { continuation in
+            streamingStartedContinuation = continuation
+        }
+    }
+
     /// When `true`, every `sendMessage()` call includes `features.voice = true`
     /// in the request body so the server injects the admin-configured voice mode
     /// system prompt (OpenWebUI `VOICE_MODE_PROMPT_TEMPLATE`).
@@ -260,6 +287,11 @@ final class ChatViewModel {
     private(set) var sessionId: String = UUID().uuidString
     private let logger = Logger(subsystem: "com.openui", category: "ChatViewModel")
     private var hasFinishedStreaming = false
+    /// Monotonically incrementing counter identifying the current streaming session.
+    /// Incremented every time a new stream starts. Captured by the `onDrained` callback
+    /// so it can detect when a new stream has started (e.g., via queue drain) and
+    /// skip cleanup that would otherwise tear down the new stream.
+    private var streamingSessionId: Int = 0
     /// Tracks the content length at the last `extractAndApplyTasksFromContent` call.
     /// Prevents the O(n) task-extraction scan from running on every single token;
     /// it only fires when the content has grown by ≥ 100 chars since the last scan.
@@ -2835,6 +2867,7 @@ final class ChatViewModel {
         hasFinishedStreaming = false
         socketHasReceivedContent = false
         selfInitiatedStream = true
+        streamingSessionId += 1
 
         // Activate the isolated streaming store so token updates bypass
         // conversation.messages and only invalidate the streaming message view.
@@ -4178,15 +4211,15 @@ final class ChatViewModel {
 
         // Drain the message queue: if there are queued messages, combine them
         // with "\n\n" and send as a single message after streaming finishes.
+        // Use directText so the text never flashes in the input box.
         // A short delay lets the UI settle (action bar, animations) before the
         // next message fires.
         if !messageQueue.isEmpty {
             let combined = messageQueue.map(\.text).joined(separator: "\n\n")
             messageQueue.removeAll()
-            inputText = combined
             Task {
                 try? await Task.sleep(nanoseconds: 1_200_000_000)
-                await sendMessage()
+                await sendMessage(directText: combined)
             }
         }
 
@@ -4351,10 +4384,9 @@ final class ChatViewModel {
         if !messageQueue.isEmpty {
             let combined = messageQueue.map(\.text).joined(separator: "\n\n")
             messageQueue.removeAll()
-            inputText = combined
             Task {
                 try? await Task.sleep(nanoseconds: 1_200_000_000)
-                await sendMessage()
+                await sendMessage(directText: combined)
             }
         }
 
@@ -4601,6 +4633,22 @@ final class ChatViewModel {
             let allIncomplete = statuses.allSatisfy { $0.done != true }
             if allIncomplete && !statuses.isEmpty {
                 conversation?.messages[lastIdx].statusHistory = []
+            }
+        }
+
+        // Auto-drain the message queue: if messages were queued while streaming,
+        // send them now that streaming has finished. This covers ALL completion
+        // paths (recovery timer, background poll, error paths, etc.) — not just
+        // the happy-path finishStreamingSuccessfully/pollAndFinish paths which
+        // already have their own drain. The `streamingSessionId` guard in the
+        // onDrained callback ensures a queue-fired sendMessage() doesn't get
+        // torn down by the OLD session's deferred cleanup.
+        if !messageQueue.isEmpty {
+            let combined = messageQueue.map(\.text).joined(separator: "\n\n")
+            messageQueue.removeAll()
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                await self?.sendMessage(directText: combined)
             }
         }
 
@@ -5743,8 +5791,15 @@ final class ChatViewModel {
                 //
                 // Content is written immediately (it doesn't affect UI chrome) so the
                 // message history tree node is always up-to-date regardless of timing.
+                // Capture session ID now so the callback can detect if a new stream
+                // started (e.g., queue drain triggered sendMessage) while we waited.
+                let capturedSessionId = streamingSessionId
                 let result = streamingStore.endStreaming(onDrained: { [weak self] in
                     guard let self else { return }
+                    // If a new streaming session started while we were draining
+                    // (e.g., the queue auto-fired), this callback belongs to the
+                    // OLD session — don't tear down the new stream.
+                    guard self.streamingSessionId == capturedSessionId else { return }
                     guard let idx = self.conversation?.messages.firstIndex(where: { $0.id == id }) else {
                         // Message may have been removed (e.g., user cleared chat); just cleanup.
                         self.cleanupStreaming()

@@ -655,8 +655,8 @@ struct ChatInputField: View {
 
     private var trailingButton: some View {
         Group {
-            if onStopGenerating != nil {
-                // Stop generating
+            if onStopGenerating != nil && !canSend {
+                // Stop generating — only shown when there is no text to queue
                 Button {
                     Haptics.play(.light)
                     onStopGenerating?()
@@ -675,6 +675,7 @@ struct ChatInputField: View {
                 .transition(.scale.combined(with: .opacity))
 
             } else if canSend {
+                // Send message (or queue it when streaming + message queue is enabled)
                 // Send message
                 Button {
                     Haptics.play(.light)

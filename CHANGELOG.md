@@ -1,5 +1,13 @@
 # Changelog
 
+## v4.11.3 — June 28, 2026
+
+### Bug Fixes
+- Fixed app interrupting Bluetooth audio (e.g. music in the car) when opening the app — the audio session no longer activates at launch, so background music continues uninterrupted.
+- Fixed the first message in a voice call not being spoken aloud — the TTS pipeline now waits reliably for streaming to begin before reading the response.
+- Fixed message queue not showing the send button when typing while a response is streaming — the send button now appears so you can queue messages mid-stream.
+- Fixed queued messages not auto-sending after the current response finishes streaming.
+
 ## v4.11.2 — June 26, 2026
 
 ### Improvements

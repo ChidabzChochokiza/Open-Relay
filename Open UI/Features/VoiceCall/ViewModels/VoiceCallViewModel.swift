@@ -620,8 +620,13 @@ final class VoiceCallViewModel {
         // concurrently with the LLM stream, feeding sentences to TTS as they arrive.
         Task { await chatViewModel.sendMessage() }
 
-        // Brief yield so sendMessage() can set isStreaming = true before we poll
-        try? await Task.sleep(for: .milliseconds(120))
+        // Wait event-driven until the server has accepted the request and streaming
+        // has actually started. This fixes the "first voice call message not spoken"
+        // bug where the 120ms blind sleep wasn't long enough for the first message
+        // (which must create the conversation on the server before streaming begins).
+        // waitForStreamingToStart() returns instantly on subsequent messages and is
+        // bounded by the server's request timeout — never hangs indefinitely.
+        await chatViewModel.waitForStreamingToStart()
 
         // Store the task so endCall() can cancel it if the user disconnects mid-response.
         responseTask = Task { [weak self] in
