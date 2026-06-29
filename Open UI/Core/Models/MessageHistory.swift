@@ -383,16 +383,148 @@ struct MessageHistory: Sendable {
         return history
     }
 
+    // MARK: - v0.7 Output Array Reconstruction
+
+    /// Reconstructs a legacy-style content string from Open WebUI v0.7's structured
+    /// `output` array, producing inline `<details type="tool_calls">` and
+    /// `<details type="reasoning">` blocks that the existing `ToolCallParser`
+    /// can render without modification.
+    ///
+    /// Output array structure (v0.7+):
+    /// ```
+    /// [
+    ///   { type: "message", content: [{type: "output_text", text: "..."}] },
+    ///   { type: "function_call", id: "...", call_id: "...", name: "search_web", arguments: "{...}", status: "completed" },
+    ///   { type: "function_call_output", call_id: "...", output: [{type: "input_text", text: "..."}], status: "completed" },
+    ///   { type: "message", content: [{type: "output_text", text: "Final answer..."}] },
+    /// ]
+    /// ```
+    ///
+    /// Returns `nil` if the output array is empty or has no usable content.
+    static func reconstructContentFromOutput(_ outputArr: [[String: Any]]) -> String? {
+        // First pass: build a map of call_id → result text from function_call_output items
+        var outputByCallId: [String: String] = [:]
+        for item in outputArr {
+            guard (item["type"] as? String) == "function_call_output",
+                  let callId = item["call_id"] as? String else { continue }
+            // Extract result text from output[].text
+            if let outputItems = item["output"] as? [[String: Any]] {
+                let texts = outputItems.compactMap { o -> String? in
+                    guard let text = o["text"] as? String, !text.isEmpty else { return nil }
+                    return text
+                }
+                if !texts.isEmpty {
+                    outputByCallId[callId] = texts.joined(separator: "\n")
+                }
+            }
+        }
+
+        // Second pass: build content string in order
+        var parts: [String] = []
+        for item in outputArr {
+            guard let type = item["type"] as? String else { continue }
+
+            switch type {
+            case "message":
+                // Plain text or final answer
+                guard let contentArr = item["content"] as? [[String: Any]] else { continue }
+                let textParts = contentArr.compactMap { piece -> String? in
+                    guard (piece["type"] as? String) == "output_text",
+                          let text = piece["text"] as? String, !text.isEmpty else { return nil }
+                    return text
+                }
+                let text = textParts.joined()
+                if !text.isEmpty {
+                    parts.append(text)
+                }
+
+            case "function_call":
+                // Tool call → reconstruct <details type="tool_calls"> block
+                guard let name = item["name"] as? String, !name.isEmpty else { continue }
+                let callId = item["call_id"] as? String ?? item["id"] as? String ?? ""
+                let itemId = item["id"] as? String ?? callId
+                let status = item["status"] as? String ?? "completed"
+                let isDone = (status == "completed")
+                let arguments = item["arguments"] as? String ?? ""
+
+                // HTML-entity encode arguments for use as an attribute value
+                let encodedArgs = htmlEntityEncode(arguments)
+                // Retrieve the matching result
+                let resultText = outputByCallId[callId] ?? ""
+                let encodedResult = htmlEntityEncode(resultText)
+
+                let doneAttr = isDone ? "true" : "false"
+                // Build the details block matching ToolCallParser expectations
+                // Result goes both as `result` attribute (fast path) and as body (fallback)
+                let block: String
+                if resultText.isEmpty {
+                    block = """
+                    <details type="tool_calls" id="\(itemId)" name="\(name)" done="\(doneAttr)" arguments="\(encodedArgs)">
+                    <summary>Tool Executed</summary>
+                    </details>
+                    """
+                } else {
+                    block = """
+                    <details type="tool_calls" id="\(itemId)" name="\(name)" done="\(doneAttr)" arguments="\(encodedArgs)" result="\(encodedResult)">
+                    <summary>Tool Executed</summary>
+                    \(resultText)
+                    </details>
+                    """
+                }
+                parts.append(block)
+
+            case "reasoning":
+                // Reasoning block (e.g. from Gemini) → <details type="reasoning">
+                if let contentArr = item["content"] as? [[String: Any]] {
+                    let reasoningText = contentArr.compactMap { piece -> String? in
+                        guard (piece["type"] as? String) == "output_text",
+                              let text = piece["text"] as? String, !text.isEmpty else { return nil }
+                        return text
+                    }.joined()
+                    if !reasoningText.isEmpty {
+                        let block = """
+                        <details type="reasoning" done="true">
+                        <summary>Thinking</summary>
+                        \(reasoningText)
+                        </details>
+                        """
+                        parts.append(block)
+                    }
+                }
+
+            default:
+                break  // Skip function_call_output (already consumed above) and unknown types
+            }
+        }
+
+        guard !parts.isEmpty else { return nil }
+        return parts.joined(separator: "\n\n")
+    }
+
+    /// HTML-entity encodes a string for safe use as an XML/HTML attribute value.
+    /// Encodes & " < > ' to prevent attribute parsing issues in ToolCallParser.
+    private static func htmlEntityEncode(_ str: String) -> String {
+        str
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "'", with: "&#39;")
+    }
+
     /// Parses a single node from server JSON.
     static func parseNode(id: String, from msg: [String: Any]) -> HistoryNode {
         let roleStr = msg["role"] as? String ?? "user"
         let role = MessageRole(rawValue: roleStr) ?? .user
         var content = msg["content"] as? String ?? ""
-        if content.isEmpty,
-           let outputArr = msg["output"] as? [[String: Any]],
-           let firstOutput = outputArr.first,
-           let contentArr = firstOutput["content"] as? [[String: Any]] {
-            content = contentArr.compactMap { $0["text"] as? String }.joined()
+        // v0.7+: content is stored in a structured `output` array.
+        // Reconstruct the full content string (with inline <details> blocks for
+        // tool calls and reasoning) so the existing ToolCallParser renders everything
+        // correctly: text, tool call cards, and reasoning blocks — all in order.
+        if content.isEmpty, let outputArr = msg["output"] as? [[String: Any]] {
+            if let reconstructed = reconstructContentFromOutput(outputArr) {
+                content = reconstructed
+            }
         }
         // Extract any inline base64 image data URIs off the main thread.
         // Replaces ![alt](data:image/...;base64,...) with ![alt](imgcache://TOKEN)

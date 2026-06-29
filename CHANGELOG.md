@@ -1,5 +1,13 @@
 # Changelog
 
+## v4.12 — June 29, 2026
+
+### What's New
+- Fixed compatibility with Open WebUI v0.10+ — messages, tool call cards, streaming, and chat history all work correctly after the server switched to a structured `output` array format for storing assistant responses.
+
+### Bug Fixes
+- Fixed attached files (PDFs, documents) being "forgotten" after the first reply — the request now retains access to uploaded files in the chat throughout the entire conversation, including on regenerate and edit.
+
 ## v4.11.3 — June 28, 2026
 
 ### Bug Fixes
