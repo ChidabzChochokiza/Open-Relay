@@ -532,90 +532,256 @@ struct Open_UIApp: App {
 
 // MARK: - App Launch Screen
 
-/// A single floating ambient orb used in the launch screen background.
-private struct LaunchOrb: View {
-    let color: Color
-    let size: CGFloat
-    @State private var offset: CGSize = .zero
-    @State private var opacity: Double = 0
-
-    var body: some View {
-        Circle()
-            .fill(color.opacity(opacity))
-            .frame(width: size, height: size)
-            .blur(radius: size * 0.4)
-            .offset(offset)
-            .onAppear {
-                let randomX = CGFloat.random(in: -120...120)
-                let randomY = CGFloat.random(in: -120...120)
-                withAnimation(.easeInOut(duration: Double.random(in: 6...10)).repeatForever(autoreverses: true)) {
-                    offset = CGSize(width: randomX, height: randomY)
-                }
-                withAnimation(.easeInOut(duration: 2)) {
-                    opacity = Double.random(in: 0.15...0.35)
-                }
-            }
-    }
-}
-
 /// Animated launch screen shown during app startup (session validation / restore).
 /// Fades away smoothly to reveal the chat view underneath — no jarring swap.
 private struct AppLaunchView: View {
     @Environment(\.theme) private var theme
 
-    // Pulse animation state
-    @State private var pulse = false
+    // Entry animation state
+    @State private var logoScale: CGFloat = 0.82
+    @State private var logoOpacity: Double = 0
+    @State private var textOpacity: Double = 0
+    @State private var textOffset: CGFloat = 18
+    @State private var dotsOpacity: Double = 0
+
+    // Rotating arc
+    @State private var arcRotation: Double = 0
+
+    // Bloom pulse
+    @State private var bloomScale: CGFloat = 1.0
+    @State private var bloomOpacity: Double = 0.18
+
+    // Shimmer sweep
+    @State private var shimmerOffset: CGFloat = -200
 
     var body: some View {
         ZStack {
-            theme.background.ignoresSafeArea()
+            // ── Background: deep layered gradient ──
+            launchBackground
 
-            // Ambient floating orbs
-            LaunchOrb(color: theme.brandPrimary, size: 200)
-                .offset(x: -80, y: -200)
-            LaunchOrb(color: theme.brandPrimary.opacity(0.6), size: 160)
-                .offset(x: 100, y: -100)
-            LaunchOrb(color: theme.brandPrimary.opacity(0.4), size: 120)
-                .offset(x: -60, y: 180)
-            LaunchOrb(color: theme.info.opacity(0.3), size: 140)
-                .offset(x: 80, y: 250)
+            // ── Center content ──
+            VStack(spacing: 0) {
+                Spacer()
 
-            // Centered logo with pulsing rings
-            VStack(spacing: 28) {
+                // Logo card
                 ZStack {
-                    // Outer pulsing ring
+                    // Outer bloom glow
                     Circle()
-                        .stroke(theme.brandPrimary.opacity(0.15), lineWidth: 1.5)
-                        .frame(width: pulse ? 160 : 130, height: pulse ? 160 : 130)
-                        .animation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true), value: pulse)
+                        .fill(
+                            RadialGradient(
+                                colors: [theme.brandPrimary.opacity(bloomOpacity), .clear],
+                                center: .center,
+                                startRadius: 0,
+                                endRadius: 90
+                            )
+                        )
+                        .frame(width: 180, height: 180)
+                        .scaleEffect(bloomScale)
+                        .blur(radius: 8)
 
-                    // Inner pulsing ring
+                    // Rotating conic arc ring
                     Circle()
-                        .stroke(theme.brandPrimary.opacity(0.25), lineWidth: 1.5)
-                        .frame(width: pulse ? 128 : 110, height: pulse ? 128 : 110)
-                        .animation(.easeInOut(duration: 1.6).delay(0.2).repeatForever(autoreverses: true), value: pulse)
+                        .trim(from: 0, to: 0.28)
+                        .stroke(
+                            AngularGradient(
+                                colors: [theme.brandPrimary.opacity(0.9), theme.brandPrimary.opacity(0.0)],
+                                center: .center
+                            ),
+                            style: StrokeStyle(lineWidth: 2, lineCap: .round)
+                        )
+                        .frame(width: 118, height: 118)
+                        .rotationEffect(.degrees(arcRotation))
 
-                    // Solid background circle
+                    // Static thin outer ring
                     Circle()
-                        .fill(theme.brandPrimary.opacity(0.08))
-                        .frame(width: 100, height: 100)
+                        .stroke(theme.brandPrimary.opacity(0.12), lineWidth: 1)
+                        .frame(width: 118, height: 118)
+
+                    // Glass card behind icon
+                    RoundedRectangle(cornerRadius: 26, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                        .frame(width: 88, height: 88)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                                .stroke(
+                                    LinearGradient(
+                                        colors: [
+                                            Color.white.opacity(0.25),
+                                            Color.white.opacity(0.05),
+                                            theme.brandPrimary.opacity(0.15)
+                                        ],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    ),
+                                    lineWidth: 1
+                                )
+                        )
+                        .shadow(color: theme.brandPrimary.opacity(0.25), radius: 20, x: 0, y: 8)
+                        .shadow(color: .black.opacity(0.3), radius: 12, x: 0, y: 4)
 
                     // App icon
                     Image("AppIconImage")
                         .resizable()
                         .scaledToFill()
-                        .frame(width: 72, height: 72)
+                        .frame(width: 64, height: 64)
                         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 }
+                .scaleEffect(logoScale)
+                .opacity(logoOpacity)
 
-                // App name
-                Text("Open Relay")
-                    .scaledFont(size: 28, weight: .bold, design: .rounded)
-                    .foregroundStyle(theme.textPrimary)
+                // ── Wordmark ──
+                VStack(spacing: 8) {
+                    ZStack {
+                        // Base text
+                        Text("Open Relay")
+                            .font(.system(size: 30, weight: .semibold, design: .rounded))
+                            .tracking(0.5)
+                            .foregroundStyle(theme.textPrimary)
+
+                        // Shimmer overlay
+                        Text("Open Relay")
+                            .font(.system(size: 30, weight: .semibold, design: .rounded))
+                            .tracking(0.5)
+                            .foregroundStyle(
+                                LinearGradient(
+                                    colors: [
+                                        .clear,
+                                        Color.white.opacity(0.7),
+                                        .clear
+                                    ],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                            .mask(
+                                Rectangle()
+                                    .frame(width: 80, height: 60)
+                                    .offset(x: shimmerOffset)
+                            )
+                    }
+                    .padding(.top, 32)
+
+                    // Subtitle / tagline
+                    Text("Your AI, Everywhere")
+                        .font(.system(size: 13, weight: .regular, design: .rounded))
+                        .tracking(1.5)
+                        .foregroundStyle(theme.textTertiary)
+                }
+                .opacity(textOpacity)
+                .offset(y: textOffset)
+
+                Spacer()
+
+                // ── Loading dots ──
+                LaunchLoadingDots(color: theme.brandPrimary)
+                    .opacity(dotsOpacity)
+                    .padding(.bottom, 56)
             }
         }
         .onAppear {
-            pulse = true
+            // Staggered entry
+            withAnimation(.spring(response: 0.65, dampingFraction: 0.72).delay(0.05)) {
+                logoScale = 1.0
+                logoOpacity = 1.0
+            }
+            withAnimation(.easeOut(duration: 0.55).delay(0.3)) {
+                textOpacity = 1.0
+                textOffset = 0
+            }
+            withAnimation(.easeIn(duration: 0.4).delay(0.55)) {
+                dotsOpacity = 1.0
+            }
+
+            // Continuously rotate the arc
+            withAnimation(.linear(duration: 1.8).repeatForever(autoreverses: false)) {
+                arcRotation = 360
+            }
+
+            // Bloom pulse
+            withAnimation(.easeInOut(duration: 2.2).repeatForever(autoreverses: true)) {
+                bloomScale = 1.15
+                bloomOpacity = 0.28
+            }
+
+            // Shimmer sweep (runs once after logo appears)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                withAnimation(.easeInOut(duration: 1.1)) {
+                    shimmerOffset = 260
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var launchBackground: some View {
+        // Deep base
+        Color.black.ignoresSafeArea()
+
+        // Layered radial glows for depth
+        GeometryReader { geo in
+            let w = geo.size.width
+            let h = geo.size.height
+            ZStack {
+                // Top-left teal glow
+                RadialGradient(
+                    colors: [theme.brandPrimary.opacity(0.22), .clear],
+                    center: .center,
+                    startRadius: 0,
+                    endRadius: w * 0.65
+                )
+                .frame(width: w * 1.1, height: w * 1.1)
+                .position(x: w * 0.15, y: h * 0.18)
+                .blur(radius: 10)
+
+                // Bottom-right secondary glow
+                RadialGradient(
+                    colors: [theme.info.opacity(0.14), .clear],
+                    center: .center,
+                    startRadius: 0,
+                    endRadius: w * 0.55
+                )
+                .frame(width: w * 0.9, height: w * 0.9)
+                .position(x: w * 0.85, y: h * 0.78)
+                .blur(radius: 14)
+
+                // Center very subtle warmth
+                RadialGradient(
+                    colors: [theme.brandPrimary.opacity(0.06), .clear],
+                    center: .center,
+                    startRadius: 0,
+                    endRadius: w * 0.45
+                )
+                .frame(width: w, height: w)
+                .position(x: w * 0.5, y: h * 0.45)
+            }
+        }
+        .ignoresSafeArea()
+    }
+}
+
+/// Three-dot pulsing loading indicator for the launch screen.
+private struct LaunchLoadingDots: View {
+    let color: Color
+    @State private var phase = 0
+
+    private let dotSize: CGFloat = 5
+    private let spacing: CGFloat = 8
+
+    var body: some View {
+        HStack(spacing: spacing) {
+            ForEach(0..<3, id: \.self) { i in
+                Circle()
+                    .fill(color.opacity(phase == i ? 0.9 : 0.25))
+                    .frame(width: dotSize, height: dotSize)
+                    .scaleEffect(phase == i ? 1.3 : 1.0)
+                    .animation(.easeInOut(duration: 0.35), value: phase)
+            }
+        }
+        .onAppear {
+            // Cycle through dots
+            Timer.scheduledTimer(withTimeInterval: 0.45, repeats: true) { _ in
+                phase = (phase + 1) % 3
+            }
         }
     }
 }
@@ -627,47 +793,88 @@ private struct AppLaunchErrorView: View {
     let onSwitchAccount: () -> Void
     @Environment(\.theme) private var theme
 
+    @State private var appeared = false
+
     var body: some View {
         ZStack {
-            theme.background.ignoresSafeArea()
-
-            LaunchOrb(color: theme.brandPrimary, size: 200)
-                .offset(x: -80, y: -200)
-            LaunchOrb(color: theme.brandPrimary.opacity(0.4), size: 120)
-                .offset(x: -60, y: 180)
+            // Same modern background
+            Color.black.ignoresSafeArea()
+            GeometryReader { geo in
+                let w = geo.size.width
+                let h = geo.size.height
+                RadialGradient(
+                    colors: [theme.error.opacity(0.18), .clear],
+                    center: .center, startRadius: 0, endRadius: w * 0.65
+                )
+                .frame(width: w * 1.1, height: w * 1.1)
+                .position(x: w * 0.5, y: h * 0.3)
+                .blur(radius: 12)
+            }
+            .ignoresSafeArea()
 
             VStack(spacing: 20) {
-                Image(systemName: "wifi.exclamationmark")
-                    .font(.system(size: 44))
-                    .foregroundStyle(theme.textTertiary)
+                // Error icon in glass card
+                ZStack {
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                        .frame(width: 76, height: 76)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                .stroke(theme.error.opacity(0.35), lineWidth: 1)
+                        )
+                        .shadow(color: theme.error.opacity(0.2), radius: 16, x: 0, y: 6)
 
-                Text("Connection Issue")
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(theme.textPrimary)
-
-                Text(error)
-                    .font(.subheadline)
-                    .foregroundStyle(theme.textSecondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 32)
-
-                Button(action: onRetry) {
-                    Label("Retry", systemImage: "arrow.clockwise")
-                        .font(.body.weight(.medium))
-                        .frame(minWidth: 140)
-                        .frame(height: 50)
-                        .foregroundStyle(theme.buttonPrimaryText)
+                    Image(systemName: "wifi.exclamationmark")
+                        .font(.system(size: 28, weight: .medium))
+                        .foregroundStyle(theme.error)
                 }
-                .background(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(theme.buttonPrimary)
-                )
-                .padding(.top, 4)
+                .scaleEffect(appeared ? 1 : 0.8)
+                .opacity(appeared ? 1 : 0)
 
-                Button("Sign in with different account", action: onSwitchAccount)
-                    .font(.footnote)
-                    .foregroundStyle(theme.textTertiary)
-                    .padding(.top, 2)
+                VStack(spacing: 8) {
+                    Text("Connection Issue")
+                        .font(.system(size: 22, weight: .semibold, design: .rounded))
+                        .foregroundStyle(theme.textPrimary)
+
+                    Text(error)
+                        .font(.subheadline)
+                        .foregroundStyle(theme.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 40)
+                }
+                .opacity(appeared ? 1 : 0)
+                .offset(y: appeared ? 0 : 12)
+
+                VStack(spacing: 12) {
+                    Button(action: onRetry) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 15, weight: .medium))
+                            Text("Try Again")
+                                .font(.system(size: 16, weight: .semibold, design: .rounded))
+                        }
+                        .frame(minWidth: 160)
+                        .frame(height: 52)
+                        .foregroundStyle(theme.buttonPrimaryText)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill(theme.buttonPrimary)
+                                .shadow(color: theme.buttonPrimary.opacity(0.4), radius: 12, x: 0, y: 4)
+                        )
+                    }
+
+                    Button("Sign in with a different account", action: onSwitchAccount)
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundStyle(theme.textTertiary)
+                }
+                .opacity(appeared ? 1 : 0)
+                .offset(y: appeared ? 0 : 10)
+                .padding(.top, 6)
+            }
+        }
+        .onAppear {
+            withAnimation(.spring(response: 0.55, dampingFraction: 0.75).delay(0.1)) {
+                appeared = true
             }
         }
     }
