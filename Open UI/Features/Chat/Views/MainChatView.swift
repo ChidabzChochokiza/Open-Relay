@@ -102,6 +102,7 @@ struct MainChatView: View {
 
     /// Top-level section collapse states (persisted across launches).
     @AppStorage("sidebar_folders_expanded") private var foldersExpanded: Bool = true
+    @AppStorage("sidebar_shared_folders_expanded") private var sharedFoldersExpanded: Bool = true
     @AppStorage("sidebar_channels_expanded") private var channelsExpanded: Bool = true
     @AppStorage("sidebar_chats_expanded") private var chatsExpanded: Bool = true
     /// Tracks which time-group sub-sections are collapsed (e.g. "Pinned", "Today").
@@ -1252,31 +1253,27 @@ struct MainChatView: View {
     // MARK: - New Chat
 
     private func startNewChat() {
-        // If we're already on the new-chat screen AND a transcription is in
-        // progress, stay put — destroying the VM would silently discard the work.
-        let alreadyOnNewChat = activeConversationId == nil && activeChannelId == nil
         let currentNewVM = dependencies.activeChatStore.viewModel(for: nil)
-        if alreadyOnNewChat && currentNewVM.hasActiveTranscriptions {
+
+        // If a transcription is running on the new-chat VM, stay put regardless
+        // of whether we're already on the new-chat screen.
+        if currentNewVM.hasActiveTranscriptions {
             return
         }
 
-        // If we're NOT already on the new-chat screen, just navigate there
-        // without resetting the VM — the transcription can keep running.
-        // Only remove + recreate the VM when there's no ongoing work.
-        let shouldRecreateVM = !currentNewVM.hasActiveTranscriptions
-        if shouldRecreateVM {
+        // Always remove + recreate the VM so derived state (random prompt cards,
+        // terminal status, model avatar, etc.) refreshes correctly. The view
+        // identity bump (.id change) is what drives those @State resets.
+        // All state mutations are wrapped in a non-animating transaction so the
+        // swap is an instant replacement with no slide/fade animation.
+        var txn = Transaction()
+        txn.disablesAnimations = true
+        withTransaction(txn) {
             dependencies.activeChatStore.remove(nil)
-        }
-
-        // Keep ALL state mutations in one withAnimation pass so SwiftUI
-        // performs a single animated view-identity transition (no flash/revert).
-        withAnimation(.easeInOut(duration: 0.2)) {
             activeConversationId = nil
             activeChannelId = nil
             activeFolderWorkspaceId = nil
-            if shouldRecreateVM {
-                newChatGeneration += 1
-            }
+            newChatGeneration += 1
         }
         // Clear the persisted last-active conversation so a cold launch after
         // this explicit new-chat navigation does not restore the old chat.
@@ -1373,6 +1370,11 @@ struct MainChatView: View {
                     let foldersEnabled = dependencies.authViewModel.featurePermissions.folders
                     if foldersEnabled && !folderVM.featureDisabled {
                         drawerFoldersSection(folderVM: folderVM)
+                    }
+
+                    // ── SHARED WITH ME SECTION ───────────────────────────
+                    if foldersEnabled && !folderVM.sharedFolders.isEmpty {
+                        drawerSharedFoldersSection(folderVM: folderVM)
                     }
 
                     // ── DIVIDER between Folders & Channels ──────────────
@@ -1980,6 +1982,44 @@ struct MainChatView: View {
                             if activeConversationId == chatId {
                                 startNewChat()
                             }
+                        },
+                        onShareChat: { conversation in
+                            sharingConversation = conversation
+                        },
+                        onExportChat: { conversation, format in
+                            let mainFormat: ExportFormat
+                            switch format {
+                            case .json: mainFormat = .json
+                            case .txt: mainFormat = .txt
+                            case .pdf: mainFormat = .pdf
+                            }
+                            Task { await exportChat(conversation, format: mainFormat) }
+                        },
+                        onRenameChat: { conversation in
+                            renamingConversation = conversation
+                            renameText = conversation.title
+                        },
+                        onCloneChat: { conversation in
+                            Task {
+                                guard let manager = dependencies.conversationManager else { return }
+                                let cloned = try? await manager.cloneConversation(id: conversation.id)
+                                if let cloned {
+                                    await listViewModel.refreshConversations()
+                                    activeConversationId = cloned.id
+                                    closeDrawer()
+                                }
+                            }
+                        },
+                        onArchiveChat: { conversation in
+                            Task {
+                                await listViewModel.toggleArchive(conversation: conversation)
+                                if !conversation.archived && activeConversationId == conversation.id {
+                                    activeConversationId = nil
+                                }
+                            }
+                        },
+                        onShareFolder: { folder in
+                            Task { await folderVM.beginEdit(folder: folder) }
                         }
                     )
                     .padding(.horizontal, Spacing.sm)
@@ -1987,6 +2027,142 @@ struct MainChatView: View {
             }
         }
         .animation(.easeInOut(duration: AnimDuration.medium), value: folderVM.folders.map(\.id))
+    }
+
+    // MARK: - Drawer Shared Folders Section
+
+    @ViewBuilder
+    private func drawerSharedFoldersSection(folderVM: FolderListViewModel) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Section header
+            Button {
+                withAnimation(.easeInOut(duration: AnimDuration.fast)) {
+                    sharedFoldersExpanded.toggle()
+                }
+                Haptics.play(.light)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.down")
+                        .scaledFont(size: 8, weight: .bold, context: .list)
+                        .foregroundStyle(theme.textTertiary)
+                        .rotationEffect(.degrees(sharedFoldersExpanded ? 0 : -90))
+                        .animation(.easeInOut(duration: AnimDuration.fast), value: sharedFoldersExpanded)
+
+                    Image(systemName: "person.2.fill")
+                        .scaledFont(size: 10, weight: .semibold, context: .list)
+                        .foregroundStyle(theme.textTertiary)
+
+                    Text("Shared with Me")
+                        .scaledFont(size: 12, weight: .medium, context: .list)
+                        .fontWeight(.bold)
+                        .foregroundStyle(theme.textTertiary)
+                        .textCase(.uppercase)
+                        .tracking(0.5)
+
+                    Spacer()
+                }
+                .padding(.horizontal, Spacing.md)
+                .padding(.vertical, Spacing.sm)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if sharedFoldersExpanded {
+                ForEach(folderVM.sharedFolders) { folder in
+                    sharedFolderRow(folder: folder, folderVM: folderVM)
+                        .padding(.horizontal, Spacing.sm)
+                }
+            }
+        }
+        .animation(.easeInOut(duration: AnimDuration.medium), value: folderVM.sharedFolders.map(\.id))
+    }
+
+    /// A single shared folder row — shows folder name with a shared badge.
+    /// Only allows "Open" action (no rename, delete, or move for shared folders).
+    @ViewBuilder
+    private func sharedFolderRow(folder: ChatFolder, folderVM: FolderListViewModel) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                Task { await folderVM.toggleSharedFolderExpanded(folder: folder) }
+                Haptics.play(.light)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right")
+                        .scaledFont(size: 8, weight: .bold, context: .list)
+                        .foregroundStyle(theme.textTertiary)
+                        .rotationEffect(.degrees(folder.isExpanded ? 90 : 0))
+                        .animation(.easeInOut(duration: AnimDuration.fast), value: folder.isExpanded)
+
+                    Image(systemName: "folder.fill.badge.person.crop")
+                        .scaledFont(size: 13, context: .list)
+                        .foregroundStyle(theme.brandPrimary.opacity(0.8))
+
+                    Text(folder.name)
+                        .scaledFont(size: 14, context: .list)
+                        .foregroundStyle(theme.textPrimary)
+                        .lineLimit(1)
+
+                    Spacer()
+
+                    if folder.readonly {
+                        Image(systemName: "eye")
+                            .scaledFont(size: 10, context: .list)
+                            .foregroundStyle(theme.textTertiary)
+                    }
+                }
+                .padding(.horizontal, Spacing.md)
+                .padding(.vertical, 7)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            // Expanded chats list
+            if folder.isExpanded {
+                if folder.chats.isEmpty {
+                    Text("No chats")
+                        .scaledFont(size: 13, context: .list)
+                        .foregroundStyle(theme.textTertiary)
+                        .padding(.horizontal, Spacing.md + 20)
+                        .padding(.vertical, 4)
+                } else {
+                    ForEach(folder.chats) { chat in
+                        Button {
+                            activeConversationId = chat.id
+                            activeFolderWorkspaceId = nil
+                            SharedDataService.shared.saveLastActiveConversationId(chat.id)
+                            closeDrawer()
+                        } label: {
+                            HStack {
+                                Text(chat.title)
+                                    .scaledFont(size: 13, context: .list)
+                                    .fontWeight(activeConversationId == chat.id ? .semibold : .regular)
+                                    .foregroundStyle(
+                                        activeConversationId == chat.id ? theme.textPrimary : theme.textSecondary
+                                    )
+                                    .lineLimit(1)
+                                Spacer()
+                                if folder.readonly {
+                                    Image(systemName: "lock.fill")
+                                        .scaledFont(size: 9, context: .list)
+                                        .foregroundStyle(theme.textTertiary)
+                                }
+                            }
+                            .padding(.leading, Spacing.md + 20)
+                            .padding(.trailing, Spacing.md)
+                            .padding(.vertical, 6)
+                            .background(
+                                activeConversationId == chat.id
+                                    ? theme.brandPrimary.opacity(0.08)
+                                    : Color.clear
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: CornerRadius.sm))
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - Drawer Sub-Section Header (for LazyVStack chat groups)
@@ -2175,12 +2351,22 @@ struct MainChatView: View {
                 .buttonStyle(.plain)
             } else {
                 Button {
-                    dependencies.activeChatStore.prewarm(conversationId: conversation.id, using: dependencies)
-                    activeConversationId = conversation.id
-                    activeChannelId = nil  // Clear channel when opening a chat
-                    activeFolderWorkspaceId = nil  // Clear folder highlight when opening a regular chat
-                    SharedDataService.shared.saveLastActiveConversationId(conversation.id)
-                    closeDrawer()
+                    // Prewarm the target VM so ChatDetailView's load() and
+                    // .defaultScrollAnchor(.bottom) are already in flight before
+                    // the view appears. ChatDetailView's isContentReady blur+opacity
+                    // curtain will mask the chat pane until messages are loaded
+                    // and positioned at the bottom — no visible scroll, no mid-chat reveal.
+                    let targetId = conversation.id
+                    guard targetId != activeConversationId else { return }
+                    dependencies.activeChatStore.prewarm(conversationId: targetId, using: dependencies)
+                    activeConversationId = targetId
+                    activeChannelId = nil
+                    activeFolderWorkspaceId = nil
+                    SharedDataService.shared.saveLastActiveConversationId(targetId)
+                    // Close the drawer with a smooth spring so the sidebar slides away
+                    // while the chat pane is still masked by the blur curtain.
+                    closeDrawerAnimated()
+                    Haptics.play(.light)
                 } label: {
                     HStack {
                         Text(conversation.title)

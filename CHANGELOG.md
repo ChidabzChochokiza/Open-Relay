@@ -1,5 +1,15 @@
 # Changelog
 
+## v4.13 — July 4, 2026
+
+### What's New
+- Added Shared Folders — share any folder of chats with specific people or groups, set read or write access, and browse folders others have shared with you directly from the sidebar. Chats in read-only shared folders open in view-only mode with a lock banner instead of the input field.
+- Added "Revoke All" button in Shared Chats — revoke every shared link at once with a single tap and confirmation.
+- Added "Clone" option in Automations — duplicate any automation as a starting point from its context menu.
+
+### Improvements
+- Further scrolling/animation smoothness.
+
 ## v4.12 — June 29, 2026
 
 ### What's New

@@ -128,17 +128,31 @@ actor StreamingPipeline {
     /// Drains any remaining buffer quickly so the user isn't waiting.
     private let finishingLatencyFrames: Double = 6
 
-    /// Minimum chars/frame floor — ensures at least a trickle even with tiny buffers.
-    private let minRatePerFrame: Double = 0.3
+    /// Minimum chars/frame floor — raised from 0.3 to 1.5 so brief server pauses
+    /// don't crater the reveal rate to near-zero.  At 60 Hz, 1.5 chars/frame = 90
+    /// chars/sec — enough to keep a smooth visible trickle across a 100ms gap.
+    private let minRatePerFrame: Double = 1.5
 
     /// Maximum chars/frame cap — 15 chars/frame × 60 Hz = 900 chars/sec,
     /// enough to reveal a fast model's output without visible lag.
     private let maxRatePerFrame: Double = 15.0
 
-    /// Perceptual keep-back: reserve this many chars so the drain never fully
-    /// empties the buffer mid-stream (avoids the "catch-up then pause" stutter).
+    /// Perceptual keep-back: reserve chars so the drain never fully empties the
+    /// buffer mid-stream (avoids the "catch-up then pause" stutter when the server
+    /// briefly stalls). Raised from 2 → 8 to absorb a ~50ms pause at 150 chars/sec.
     /// Disabled when isFinishing (we want to drain to zero).
-    private let tailReserve: Int = 2
+    private let tailReserve: Int = 8
+
+    // MARK: - EMA smoothing for drain rate
+
+    /// Exponential moving average of `currentBuffered`, used to smooth the drain rate
+    /// across brief server pauses. Without EMA, a single tick where buffered drops to
+    /// near-zero craters the rate to minRatePerFrame and causes visible stutter.
+    ///
+    /// α = 0.25: strong smoothing (75% of rate comes from history, 25% from this tick).
+    private let emaAlpha: Double = 0.25
+    /// Running EMA of buffered char count. Initialised to 0; warms up within ~4 frames.
+    private var bufferedEMA: Double = 0
 
     // MARK: - Boundary cache (computed off-main, published via snapshot)
 
@@ -214,6 +228,7 @@ actor StreamingPipeline {
         displayedCount = 0
         drainAccumulator = 0
         isFinishing = false
+        bufferedEMA = 0
         frozenToolBoundaryOffset = 0
         frozenReasoningBoundaryOffset = 0
         frozenProseBoundaryOffset = 0
@@ -313,7 +328,17 @@ actor StreamingPipeline {
         guard effectiveBuffered > 0 else { return }
 
         let latency = isFinishing ? finishingLatencyFrames : targetLatencyFrames
-        let baseRate = Double(effectiveBuffered) / latency
+
+        // ── EMA-smoothed drain rate ───────────────────────────────────────────
+        // Update the exponential moving average of buffered char count.
+        // This smooths across brief server stalls: when the server pauses and
+        // effectiveBuffered briefly drops to near-zero, the EMA stays elevated
+        // (reflecting the recent healthy buffer depth), so baseRate stays above
+        // minRatePerFrame and the reveal doesn't crater to a near-halt.
+        // α = 0.25: 75% history + 25% this tick — strong but responsive smoothing.
+        bufferedEMA = bufferedEMA * (1.0 - emaAlpha) + Double(effectiveBuffered) * emaAlpha
+        let smoothedBuffered = isFinishing ? Double(effectiveBuffered) : max(Double(effectiveBuffered), bufferedEMA)
+        let baseRate = smoothedBuffered / latency
         let charsThisFrame: Double
 
         // Live-preview code fences (html/svg/mermaid/chart) are rendered by a

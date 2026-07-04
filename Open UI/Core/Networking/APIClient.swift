@@ -1332,6 +1332,45 @@ final class APIClient: @unchecked Sendable {
         )
     }
 
+    // MARK: - Folder Sharing (v0.7+)
+
+    /// GET /api/v1/folders/shared
+    /// Returns all folders shared *with* the current user (not owned by them).
+    func getSharedFolders() async throws -> [[String: Any]] {
+        let (data, _) = try await network.requestRaw(path: "/api/v1/folders/shared")
+        if let array = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+            return array
+        }
+        return []
+    }
+
+    /// POST /api/v1/folders/{id}/access/update
+    /// Replaces the access grants for a folder.
+    /// Pass an empty array to make the folder private (owner-only).
+    @discardableResult
+    func updateFolderAccessGrants(id: String, grants: [[String: Any]]) async throws -> [String: Any] {
+        let body: [String: Any] = ["access_grants": grants]
+        return try await network.requestJSON(
+            path: "/api/v1/folders/\(id)/access/update",
+            method: .post,
+            body: body
+        )
+    }
+
+    /// GET /api/v1/folders/{id}/shared/chats
+    /// Returns chats within a shared folder, plus a `readonly` flag.
+    /// `readonly` is true when the caller only has read permission.
+    func getSharedFolderChats(folderId: String) async throws -> (chats: [Conversation], readonly: Bool) {
+        let (data, _) = try await network.requestRaw(path: "/api/v1/folders/\(folderId)/shared/chats")
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return ([], false)
+        }
+        let readonly = root["readonly"] as? Bool ?? false
+        let chatArray = root["chats"] as? [[String: Any]] ?? []
+        let chats = chatArray.compactMap { parseFolderChatItem($0, folderId: folderId) }
+        return (chats, readonly)
+    }
+
     // MARK: - Tags
 
     func getAllTags() async throws -> [String] {
@@ -3214,6 +3253,14 @@ final class APIClient: @unchecked Sendable {
         )
     }
 
+    /// Revokes all shared chat links for the current user in one call.
+    func unshareAllConversations() async throws {
+        try await network.requestVoid(
+            path: "/api/v1/chats/share/all",
+            method: .delete
+        )
+    }
+
     /// Fetches a shared chat by its share ID.
     /// Used to display the read-only shared chat view in-app.
     func getSharedConversation(shareId: String) async throws -> Conversation {
@@ -3450,7 +3497,14 @@ final class APIClient: @unchecked Sendable {
         )
 
         if let title = json["title"] as? String, !title.isEmpty {
-            return title.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("{"),
+               let jsonData = trimmed.data(using: .utf8),
+               let parsed = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+               let parsedTitle = parsed["title"] as? String, !parsedTitle.isEmpty {
+                return parsedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            return trimmed
         }
         if let choices = json["choices"] as? [[String: Any]],
            let first = choices.first,

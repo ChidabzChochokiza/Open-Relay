@@ -10,6 +10,7 @@ struct EditFolderSheet: View {
 
     let folder: ChatFolder
     let apiClient: APIClient?
+    var currentUserId: String
     var onSave: (String, FolderData?, FolderMeta?) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -37,6 +38,7 @@ struct EditFolderSheet: View {
     @State private var showModelPicker = false
 
     @State private var showKnowledgePicker = false
+    @State private var showShareSheet = false
     @FocusState private var promptFocused: Bool
     @FocusState private var nameFocused: Bool
 
@@ -45,10 +47,12 @@ struct EditFolderSheet: View {
     init(
         folder: ChatFolder,
         apiClient: APIClient? = nil,
+        currentUserId: String = "",
         onSave: @escaping (String, FolderData?, FolderMeta?) -> Void
     ) {
         self.folder = folder
         self.apiClient = apiClient
+        self.currentUserId = currentUserId
         self.onSave = onSave
 
         _folderName = State(initialValue: folder.name)
@@ -82,6 +86,10 @@ struct EditFolderSheet: View {
 
                     knowledgeSection
 
+                    Divider().padding(.horizontal, Spacing.md)
+
+                    shareSection
+
                     Spacer(minLength: Spacing.xl)
                 }
                 .padding(.top, Spacing.md)
@@ -113,6 +121,13 @@ struct EditFolderSheet: View {
         }
         .sheet(isPresented: $showModelPicker) {
             modelPickerSheet
+        }
+        .sheet(isPresented: $showShareSheet) {
+            ShareFolderSheet(
+                folder: folder,
+                apiClient: apiClient,
+                currentUserId: currentUserId
+            )
         }
     }
 
@@ -355,6 +370,56 @@ struct EditFolderSheet: View {
                     .padding(.horizontal, Spacing.md)
                     .padding(.top, Spacing.xs)
             }
+        }
+    }
+
+    // MARK: - Share Section
+
+    /// Owner-only share row — opens the ShareFolderSheet.
+    private var shareSection: some View {
+        VStack(alignment: .leading, spacing: Spacing.sm) {
+            sectionLabel("Sharing")
+
+            Button {
+                Haptics.play(.light)
+                showShareSheet = true
+            } label: {
+                HStack(spacing: Spacing.sm) {
+                    Image(systemName: folder.isShared ? "person.2.fill" : "person.badge.plus")
+                        .scaledFont(size: 15)
+                        .foregroundStyle(theme.brandPrimary)
+                        .frame(width: 22)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(folder.isShared ? "Manage Sharing" : "Share Folder")
+                            .scaledFont(size: 15, weight: .medium)
+                            .foregroundStyle(theme.textPrimary)
+
+                        if folder.isShared {
+                            let count = folder.accessGrants.count
+                            Text(folder.isPublic
+                                 ? "Public"
+                                 : "\(count) \(count == 1 ? "person" : "people") with access")
+                                .scaledFont(size: 12)
+                                .foregroundStyle(theme.textSecondary)
+                        } else {
+                            Text("Private — only you can see this folder")
+                                .scaledFont(size: 12)
+                                .foregroundStyle(theme.textTertiary)
+                        }
+                    }
+
+                    Spacer()
+
+                    Image(systemName: "chevron.right")
+                        .scaledFont(size: 12, weight: .semibold)
+                        .foregroundStyle(theme.textTertiary)
+                }
+                .padding(.horizontal, Spacing.md)
+                .padding(.vertical, 10)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         }
     }
 

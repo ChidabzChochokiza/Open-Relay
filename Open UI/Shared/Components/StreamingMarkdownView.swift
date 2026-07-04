@@ -187,7 +187,7 @@ struct StreamingMarkdownView: View {
                 // swap from bare MarkdownView → VStack{ForEach} the moment a code
                 // fence appears, destroying the prose view for one frame (blank flash).
                 MarkdownView(text, theme: cachedTheme)
-                    .codeAutoScroll(true)
+                    .codeAutoScroll(isStreaming)
             } else {
                 VStack(alignment: .leading, spacing: 8) {
                     // Use stable type-based IDs so SwiftUI updates each segment
@@ -538,7 +538,7 @@ struct StreamingMarkdownView: View {
         case .markdown(let text):
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 MarkdownView(text, theme: cachedTheme)
-                    .codeAutoScroll(true)
+                    .codeAutoScroll(isStreaming)
             }
         case .chart(let code, let streaming):
             ChartPreviewView(

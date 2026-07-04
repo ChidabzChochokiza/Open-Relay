@@ -1,6 +1,7 @@
 import Foundation
 
-// MARK: - Supporting Types
+// MARK: - Supporting Types (imported from Channel.swift)
+// AccessGrant is defined in Channel.swift and reused here.
 
 /// Data stored on a folder that configures it as a project workspace.
 /// Maps to the `data` field in the Open WebUI folder API.
@@ -127,6 +128,21 @@ struct ChatFolder: Identifiable, Hashable, Sendable {
     /// Child folders (populated when building the tree from a flat list).
     var childFolders: [ChatFolder]
 
+    // MARK: - Sharing (v0.7+)
+
+    /// User ID of the folder owner (nil if server doesn't return it).
+    var userId: String?
+
+    /// Whether this folder is publicly accessible (access_grants contains principal_id == "*").
+    var isPublic: Bool
+
+    /// Access grants — the list of users/groups who can access this folder.
+    var accessGrants: [AccessGrant]
+
+    /// When true, this folder was shared *with* the current user (not owned by them)
+    /// and they only have read permission — chats inside are view-only.
+    var readonly: Bool
+
     init(
         id: String,
         name: String,
@@ -137,7 +153,11 @@ struct ChatFolder: Identifiable, Hashable, Sendable {
         data: FolderData? = nil,
         meta: FolderMeta? = nil,
         chats: [Conversation] = [],
-        childFolders: [ChatFolder] = []
+        childFolders: [ChatFolder] = [],
+        userId: String? = nil,
+        isPublic: Bool = false,
+        accessGrants: [AccessGrant] = [],
+        readonly: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -149,6 +169,10 @@ struct ChatFolder: Identifiable, Hashable, Sendable {
         self.meta = meta
         self.chats = chats
         self.childFolders = childFolders
+        self.userId = userId
+        self.isPublic = isPublic
+        self.accessGrants = accessGrants
+        self.readonly = readonly
     }
 
     // MARK: - Convenience computed properties
@@ -245,5 +269,59 @@ extension ChatFolder {
 
         self.chats = []
         self.childFolders = []
+
+        // Parse owner
+        self.userId = json["user_id"] as? String
+
+        // Parse access_grants and detect public access
+        if let grantsArray = json["access_grants"] as? [[String: Any]] {
+            let raw = grantsArray.compactMap { AccessGrant.fromJSON($0) }
+            self.accessGrants = AccessGrant.mergedByPrincipal(raw)
+            self.isPublic = grantsArray.contains { $0["principal_id"] as? String == "*" }
+        } else {
+            self.accessGrants = []
+            self.isPublic = false
+        }
+
+        // readonly flag — set by server on /shared/chats response; false for owned folders
+        self.readonly = json["readonly"] as? Bool ?? false
+    }
+}
+
+// MARK: - Sharing Helpers
+
+extension ChatFolder {
+    /// Returns true if the current user owns this folder.
+    func isOwnedBy(_ currentUserId: String) -> Bool {
+        guard let userId else { return true } // assume owner if server doesn't return userId
+        return userId == currentUserId
+    }
+
+    /// Returns true if this folder has been shared with at least one person or group.
+    var isShared: Bool {
+        isPublic || !accessGrants.isEmpty
+    }
+
+    /// Builds the access_grants payload for POST /folders/{id}/access/update.
+    /// Write access = TWO entries (read + write), read-only = ONE entry (read).
+    func buildGrantsPayload() -> [[String: Any]] {
+        var result: [[String: Any]] = []
+        if isPublic {
+            result.append(["principal_type": "user", "principal_id": "*", "permission": "read"])
+        }
+        for grant in accessGrants {
+            if let userId = grant.userId, userId != "*" {
+                result.append(["principal_type": "user", "principal_id": userId, "permission": "read"])
+                if grant.write {
+                    result.append(["principal_type": "user", "principal_id": userId, "permission": "write"])
+                }
+            } else if let groupId = grant.groupId {
+                result.append(["principal_type": "group", "principal_id": groupId, "permission": "read"])
+                if grant.write {
+                    result.append(["principal_type": "group", "principal_id": groupId, "permission": "write"])
+                }
+            }
+        }
+        return result
     }
 }

@@ -14,6 +14,8 @@ final class AutomationsViewModel {
 
     /// Controls the create sheet
     var showCreateSheet = false
+    /// When set, the create sheet opens pre-filled with this automation's details (Clone flow)
+    var cloneSource: Automation?
     /// Automation selected for detail/edit
     var selectedAutomation: Automation?
     /// Confirmation delete
@@ -128,6 +130,15 @@ final class AutomationsViewModel {
             errorMessage = "Failed to create: \(error.localizedDescription)"
             return nil
         }
+    }
+
+    // MARK: - Clone
+
+    /// Instead of directly creating a copy, open the create sheet pre-filled so the
+    /// user can adjust the schedule (which may have a past timestamp) before saving.
+    func cloneAutomation(_ automation: Automation) {
+        cloneSource = automation
+        showCreateSheet = true
     }
 
     // MARK: - Update

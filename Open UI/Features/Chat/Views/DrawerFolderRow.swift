@@ -23,6 +23,21 @@ struct DrawerFolderRow: View {
     var onTogglePin: ((Conversation) -> Void)?
     /// Called when a conversation should be permanently deleted (used in bulk delete).
     var onDeleteConversation: ((String) async -> Void)?
+    /// Called when the user wants to share a chat from inside the folder.
+    var onShareChat: ((Conversation) -> Void)?
+    /// Called when the user wants to export/download a chat (conversation + format).
+    var onExportChat: ((Conversation, ExportFormat) -> Void)?
+    /// Called when the user wants to rename a chat from inside the folder.
+    var onRenameChat: ((Conversation) -> Void)?
+    /// Called when the user wants to clone a chat from inside the folder.
+    var onCloneChat: ((Conversation) -> Void)?
+    /// Called when the user wants to archive a chat from inside the folder.
+    var onArchiveChat: ((Conversation) -> Void)?
+    /// Called when the user taps "Share" on the folder itself (from the folder header context menu).
+    var onShareFolder: ((ChatFolder) -> Void)?
+
+    /// Export format for chat download menu.
+    enum ExportFormat { case json, txt, pdf }
     /// Indentation depth for subfolders (0 = root level)
     var depth: Int = 0
 
@@ -153,6 +168,14 @@ struct DrawerFolderRow: View {
             }
             .contextMenu {
                 Button {
+                    onShareFolder?(folder)
+                } label: {
+                    Label("Share", systemImage: "square.and.arrow.up")
+                }
+
+                Divider()
+
+                Button {
                     Task { await folderVM.beginEdit(folder: folder) }
                 } label: {
                     Label("Edit", systemImage: "pencil")
@@ -170,6 +193,8 @@ struct DrawerFolderRow: View {
                 } label: {
                     Label("Rename", systemImage: "character.cursor.ibeam")
                 }
+
+                Divider()
 
                 Button(role: .destructive) {
                     showDeleteConfirmation = true
@@ -219,6 +244,13 @@ struct DrawerFolderRow: View {
                             onChatMoved: onChatMoved,
                             onDeleteChat: onDeleteChat,
                             onTogglePin: onTogglePin,
+                            onDeleteConversation: onDeleteConversation,
+                            onShareChat: onShareChat,
+                            onExportChat: onExportChat,
+                            onRenameChat: onRenameChat,
+                            onCloneChat: onCloneChat,
+                            onArchiveChat: onArchiveChat,
+                            onShareFolder: onShareFolder,
                             depth: depth + 1
                         )
                     }
@@ -496,15 +528,42 @@ struct DrawerFolderRow: View {
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
                 }
                 .contextMenu {
+                    // Share
                     Button {
-                        folderVM.enterFolderChatSelectionMode(folderId: folder.id)
-                        folderVM.toggleFolderChatSelection(chat.id)
+                        onShareChat?(chat)
                     } label: {
-                        Label("Select", systemImage: "checkmark.circle")
+                        Label("Share", systemImage: "square.and.arrow.up")
                     }
 
-                    Divider()
+                    // Download submenu
+                    Menu {
+                        Button {
+                            onExportChat?(chat, .json)
+                        } label: {
+                            Label("Export chat (.json)", systemImage: "doc")
+                        }
+                        Button {
+                            onExportChat?(chat, .txt)
+                        } label: {
+                            Label("Plain text (.txt)", systemImage: "doc.plaintext")
+                        }
+                        Button {
+                            onExportChat?(chat, .pdf)
+                        } label: {
+                            Label("PDF document (.pdf)", systemImage: "doc.richtext")
+                        }
+                    } label: {
+                        Label("Download", systemImage: "arrow.down.circle")
+                    }
 
+                    // Rename
+                    Button {
+                        onRenameChat?(chat)
+                    } label: {
+                        Label("Rename", systemImage: "pencil")
+                    }
+
+                    // Pin / Unpin
                     Button {
                         onTogglePin?(chat)
                     } label: {
@@ -514,29 +573,52 @@ struct DrawerFolderRow: View {
                         )
                     }
 
+                    // Clone
                     Button {
-                        let chatId = chat.id
-                        Task {
-                            await folderVM.moveChat(conversation: chat, to: nil)
-                            onChatMoved?(chatId, nil)
-                        }
+                        onCloneChat?(chat)
                     } label: {
-                        Label("Remove from Folder", systemImage: "folder.badge.minus")
+                        Label("Clone", systemImage: "doc.on.doc")
                     }
 
-                    let otherFolders = folderVM.folders.filter { $0.id != folder.id }
-                    if !otherFolders.isEmpty {
-                        Menu("Move to Folder") {
-                            ForEach(otherFolders) { other in
-                                Button {
-                                    Task { await folderVM.moveChat(conversation: chat, to: other.id) }
-                                } label: {
-                                    Label(other.name, systemImage: "folder")
-                                }
+                    // Move to folder (remove from this folder or move to another)
+                    Menu("Move to Folder") {
+                        Button {
+                            let chatId = chat.id
+                            Task {
+                                await folderVM.moveChat(conversation: chat, to: nil)
+                                onChatMoved?(chatId, nil)
+                            }
+                        } label: {
+                            Label("Remove from Folder", systemImage: "folder.badge.minus")
+                        }
+                        let otherFolders = folderVM.folders.filter { $0.id != folder.id }
+                        ForEach(otherFolders) { other in
+                            Button {
+                                Task { await folderVM.moveChat(conversation: chat, to: other.id) }
+                            } label: {
+                                Label(other.name, systemImage: "folder")
                             }
                         }
                     }
 
+                    // Archive
+                    Button {
+                        onArchiveChat?(chat)
+                    } label: {
+                        Label("Archive", systemImage: "archivebox")
+                    }
+
+                    // Select (multi-select mode)
+                    Button {
+                        folderVM.enterFolderChatSelectionMode(folderId: folder.id)
+                        folderVM.toggleFolderChatSelection(chat.id)
+                    } label: {
+                        Label("Select", systemImage: "checkmark.circle")
+                    }
+
+                    Divider()
+
+                    // Delete
                     Button(role: .destructive) {
                         chatToDelete = chat
                     } label: {

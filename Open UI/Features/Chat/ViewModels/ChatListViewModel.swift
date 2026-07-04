@@ -102,8 +102,17 @@ final class ChatListViewModel {
     }
 
     /// Conversations that are NOT inside any folder (shown in the main list).
+    ///
+    /// Excludes any conversation whose ID appears in a folder's loaded chat list,
+    /// UNLESS the conversation is pinned — pinned chats always surface to the top
+    /// section regardless of folder membership.
     var unfolderedConversations: [Conversation] {
-        conversations.filter { $0.folderId == nil || $0.folderId?.isEmpty == true }
+        let folderChatIds = Set(folderViewModel.folders.flatMap(\.chats).map(\.id))
+        return conversations.filter {
+            // Pinned chats always show in the top section regardless of folder
+            $0.pinned ||
+            (($0.folderId == nil || $0.folderId!.isEmpty) && !folderChatIds.contains($0.id))
+        }
     }
 
     /// Filtered conversations based on search text.
@@ -623,23 +632,81 @@ final class ChatListViewModel {
     // MARK: - Pin / Unpin
 
     /// Toggles the pinned state of a conversation.
+    ///
+    /// Handles folder chats correctly:
+    /// - **Pinning a folder chat:** adds it to `conversations` (with `pinned = true`) so it
+    ///   surfaces in the Pinned section. The chat remains in the folder on the server; we
+    ///   just surface it visually in `unfolderedConversations` because `pinned = true`
+    ///   satisfies the pass-through filter.
+    /// - **Unpinning a folder chat:** updates `pinned = false` in `conversations` and removes
+    ///   it so it no longer appears in the top section. It stays in the folder row as before.
     func togglePin(conversation: Conversation) async {
         guard let manager else { return }
 
         let newPinned = !conversation.pinned
 
-        // Update locally first
         if let index = conversations.firstIndex(where: { $0.id == conversation.id }) {
+            // Chat is already in the conversations array — just flip the flag.
             conversations[index].pinned = newPinned
+
+            // If we just unpinned it and it belongs to a folder, remove it from the
+            // flat conversations list so it doesn't appear in the unfoldered section.
+            if !newPinned, let folderId = conversations[index].folderId, !folderId.isEmpty {
+                conversations.remove(at: index)
+                // Make sure the folder's local chat list reflects it (reload if expanded)
+                if let folderIdx = folderViewModel.folders.firstIndex(where: { $0.id == folderId }),
+                   folderViewModel.folders[folderIdx].isExpanded {
+                    if !folderViewModel.folders[folderIdx].chats.contains(where: { $0.id == conversation.id }) {
+                        var restored = conversation
+                        restored.pinned = false
+                        folderViewModel.folders[folderIdx].chats.insert(restored, at: 0)
+                    } else {
+                        if let chatIdx = folderViewModel.folders[folderIdx].chats.firstIndex(where: { $0.id == conversation.id }) {
+                            folderViewModel.folders[folderIdx].chats[chatIdx].pinned = false
+                        }
+                    }
+                }
+            }
+        } else {
+            // Chat is NOT in the flat conversations array — it's a folder chat.
+            // Add it to conversations with pinned = true so it shows in the Pinned section.
+            var pinned = conversation
+            pinned.pinned = true
+            conversations.insert(pinned, at: 0)
+
+            // Remove it from the folder's local chat list so it doesn't appear twice.
+            if let folderId = conversation.folderId,
+               let folderIdx = folderViewModel.folders.firstIndex(where: { $0.id == folderId }) {
+                folderViewModel.folders[folderIdx].chats.removeAll { $0.id == conversation.id }
+            }
         }
 
         do {
             try await manager.pinConversation(id: conversation.id, pinned: newPinned)
         } catch {
             logger.error("Failed to toggle pin: \(error.localizedDescription)")
-            // Revert on failure
-            if let index = conversations.firstIndex(where: { $0.id == conversation.id }) {
-                conversations[index].pinned = !newPinned
+
+            // Revert: undo everything we did above
+            if newPinned {
+                // We were pinning — remove from conversations, restore to folder
+                conversations.removeAll { $0.id == conversation.id }
+                if let folderId = conversation.folderId,
+                   let folderIdx = folderViewModel.folders.firstIndex(where: { $0.id == folderId }),
+                   !folderViewModel.folders[folderIdx].chats.contains(where: { $0.id == conversation.id }) {
+                    folderViewModel.folders[folderIdx].chats.insert(conversation, at: 0)
+                }
+            } else {
+                // We were unpinning — re-insert into conversations with pinned = true
+                if !conversations.contains(where: { $0.id == conversation.id }) {
+                    conversations.insert(conversation, at: 0)
+                } else if let index = conversations.firstIndex(where: { $0.id == conversation.id }) {
+                    conversations[index].pinned = true
+                }
+                // Remove from folder list if we re-added it there
+                if let folderId = conversation.folderId,
+                   let folderIdx = folderViewModel.folders.firstIndex(where: { $0.id == folderId }) {
+                    folderViewModel.folders[folderIdx].chats.removeAll { $0.id == conversation.id }
+                }
             }
         }
     }

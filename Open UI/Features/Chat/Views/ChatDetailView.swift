@@ -15,12 +15,18 @@ import os.log
 /// using a class avoids SwiftUI @State observation overhead on every write.
 private final class PumpRef {
     var lastScrollTime: Date = .distantPast
-    /// Last offset used to compute scroll direction for nav-bar hide/show.
+    /// Last offset used to compute scroll direction for nav-bar direction detection.
     var lastNavBarOffsetY: CGFloat = 0
     /// When set, suppresses all nav-bar hide/show reactions until this date.
     /// Armed before every programmatic scrollTo() call so reflow-induced offset
     /// changes (FAB scroll, stream start, pagination) never trigger the nav bar.
     var programmaticScrollUntil: Date = .distantPast
+    /// Current scroll offset Y — tracked at 120Hz but stored here (not @State) so that
+    /// writing it never triggers a SwiftUI body re-evaluation. Read at tap-time by FAB.
+    var currentScrollOffsetY: CGFloat = 0
+    /// The ID of the message currently nearest the top of the visible viewport.
+    /// Updated continuously; read at FAB tap-time for layout-stable jump targeting.
+    var topmostVisibleMessageId: String? = nil
 }
 
 // MARK: - Chat Detail View
@@ -48,6 +54,11 @@ struct ChatDetailView: View {
     @State private var scrollPosition: ScrollPosition = .init()
     /// True when the user has manually scrolled away from the bottom.
     @State private var isScrolledUp = false
+    /// Curtain flag: keeps the message area invisible until messages are loaded
+    /// AND the scroll position has been set to the bottom. Prevents the user
+    /// from seeing skeleton → messages → scroll animation. Resets to false on
+    /// every new ChatDetailView instance (each conversation has a unique .id).
+    @State private var isContentReady = false
     /// True when the scroll position is at or very near the top (offset.y < 50pt).
     /// Used to hide the ↑ FAB when already at the very top.
     @State private var isAtTop = false
@@ -58,15 +69,14 @@ struct ChatDetailView: View {
     /// Cached scroll content height — updated via onScrollGeometryChange.
     @State private var viewState_contentHeight: CGFloat = 0
     /// Cached scroll container height — updated via onScrollGeometryChange.
-    @State private var viewState_containerHeight: CGFloat = 0
-    /// Current scroll offset Y — tracked continuously to determine which user message
-    /// is near the viewport top when the ↑ FAB is first tapped.
-    @State private var currentScrollOffsetY: CGFloat = 0
-    /// The ID of the message currently nearest the top of the visible viewport.
-    /// Captured when streaming ends so we can restore scroll position by identity
-    /// (layout-stable) rather than raw Y offset (invalidated by content-height changes
-    /// like AnimatedPresence follow-up pill animation).
-    @State private var topmostVisibleMessageId: String? = nil
+    /// Pre-seeded with screen height so welcomeView Spacers can centre content
+    /// from the very first frame (avoids the top→centre jump when a new
+    /// ChatDetailView is instantiated and the async measurement hasn't fired yet).
+    @State private var viewState_containerHeight: CGFloat = UIScreen.main.bounds.height
+    // currentScrollOffsetY and topmostVisibleMessageId are stored in _pumpRef (PumpRef class)
+    // to avoid @State observation overhead — writing them on every 120Hz scroll frame was
+    // causing the entire view body to re-evaluate, causing low-FPS scrolling. They are read
+    // at button tap-time from _pumpRef where needed.
     /// True while a user gesture (finger touch or inertia deceleration) is driving
     /// the scroll view. This is the ONLY condition under which auto-scroll can be
     /// disengaged — layout reflows, WKWebView resizes, and programmatic scrolls
@@ -91,7 +101,7 @@ struct ChatDetailView: View {
     /// Guard to prevent rapid-fire pagination triggers.
     @State private var isLoadingMoreMessages = false
     /// Maximum messages rendered at once (the sliding-window cap).
-    private let maxWindowSize = 10
+    private let maxWindowSize = 20
 
 
     // MARK: UI state
@@ -209,6 +219,17 @@ struct ChatDetailView: View {
     /// Called after the chat is successfully deleted, so the parent can
     /// navigate away smoothly (e.g. animate to new chat). Defaults to nil
     /// which falls back to router.popToRoot().
+    /// When true, this chat is from a shared folder where the user only has read permission.
+    /// Hides the input field and shows a "Read only" banner instead.
+    private var isReadOnly: Bool = false
+
+    /// Chainable modifier — enables read-only mode (for shared folders with view-only access).
+    func readOnly(_ enabled: Bool = true) -> ChatDetailView {
+        var copy = self
+        copy.isReadOnly = enabled
+        return copy
+    }
+
     private var deleteChatAction: (() -> Void)?
 
     /// Chainable modifier — lets call sites set the post-delete callback:
@@ -292,21 +313,23 @@ struct ChatDetailView: View {
             // Always rebuild when the server config changes — this handles both the
             // first-launch timing case (randomPrompts is empty) AND the case where
             // the admin updates suggestions on the server while the app is running.
-            randomPrompts = Self.resolvePromptSuggestions(
+            let updated = Self.resolvePromptSuggestions(
                 adminSuggestions: dependencies.authViewModel.backendConfig?.defaultPromptSuggestions,
                 modelSuggestions: viewModel.selectedModel?.suggestionPrompts,
                 count: promptCardCount
             )
+            withTransaction(\.animation, nil) { randomPrompts = updated }
         }
         // Also rebuild prompts when the selected model changes — the new model may
         // have per-model suggestion_prompts that should show as a fallback when the
         // admin hasn't set global prompts.
         .onChange(of: viewModel.selectedModelId) { _, _ in
-            randomPrompts = Self.resolvePromptSuggestions(
+            let updated = Self.resolvePromptSuggestions(
                 adminSuggestions: dependencies.authViewModel.backendConfig?.defaultPromptSuggestions,
                 modelSuggestions: viewModel.selectedModel?.suggestionPrompts,
                 count: promptCardCount
             )
+            withTransaction(\.animation, nil) { randomPrompts = updated }
         }
         .onAppear {
             viewModel.syncOnEntry()
@@ -555,7 +578,6 @@ struct ChatDetailView: View {
             HStack(spacing: Spacing.xs) {
                 modelSelectorButton
             }
-            .animation(MicroAnimation.gentle, value: viewModel.selectedModelId)
             .frame(maxWidth: .infinity)
 
             // Trailing: all action icons in one grouped pill (matching image 2)
@@ -765,9 +787,34 @@ struct ChatDetailView: View {
 
     // MARK: - Input Field Area
 
+    // MARK: - Read-Only Banner
+
+    /// Shown in place of the input field when this chat is from a read-only shared folder.
+    private var readOnlyBanner: some View {
+        HStack(spacing: Spacing.sm) {
+            Image(systemName: "lock.fill")
+                .scaledFont(size: 13, weight: .medium)
+                .foregroundStyle(theme.textTertiary)
+            Text("Read only — shared folder")
+                .scaledFont(size: 14, weight: .medium)
+                .foregroundStyle(theme.textSecondary)
+            Spacer()
+        }
+        .padding(.horizontal, Spacing.md)
+        .padding(.vertical, 14)
+        .background(theme.surfaceContainer.opacity(0.6))
+        .overlay(alignment: .top) { Divider().opacity(0.5) }
+    }
+
     @ViewBuilder
     private func inputFieldArea(vm: ChatViewModel) -> some View {
         @Bindable var vm = vm
+
+        if isReadOnly {
+            // ── Read-only mode: show banner instead of input field ──────────
+            readOnlyBanner
+        } else {
+        // ── Normal mode: full input field ────────────────────────────────────
         VStack(spacing: 0) {
             // Picker overlays — rendered above the input field so input stays visible
             if let url = detectedWebURL {
@@ -1075,6 +1122,7 @@ struct ChatDetailView: View {
         .onChange(of: mentionedModel) { _, newModel in
             viewModel.mentionedModelId = newModel?.id
         }
+        } // end else (normal input mode)
     }
 
     private var photoPickerLabel: some View {
@@ -1156,21 +1204,32 @@ struct ChatDetailView: View {
             scrollContent
 
             // Welcome screen — shown when no messages and not loading.
-            // The .transition(.opacity) + .animation on messages.isEmpty makes
-            // the welcome screen (with starter prompt cards) gently crossfade out
-            // as the first message's chat view fades in — instead of an abrupt cut.
             if !viewModel.isLoadingConversation && viewModel.messages.isEmpty {
-                Group {
-                    if let folder = _folderWorkspace {
-                        folderWelcomeView(folder: folder)
-                    } else {
-                        welcomeView
-                    }
+                if let folder = _folderWorkspace {
+                    folderWelcomeView(folder: folder)
+                        .transaction { $0.animation = nil }
+                } else {
+                    welcomeView
+                        .transaction { $0.animation = nil }
                 }
-                .transition(.opacity)
             }
         }
-        .animation(MicroAnimation.gentle, value: viewModel.messages.isEmpty)
+        // ── Opacity curtain ──────────────────────────────────────────────────
+        // Keep the entire message area invisible until:
+        //   • Messages are loaded AND positioned at the bottom (existing chats), OR
+        //   • Load completes with no messages (new chat — show welcome instantly).
+        // This eliminates the three-stage glitch: skeleton → messages appear at top
+        // → visible scroll-to-bottom animation. The user sees only the final state.
+        // isContentReady is set in handleViewTask() after the 150ms settle + scrollTo.
+        // It resets to false automatically on each new ChatDetailView instance because
+        // every conversation gets a unique .id() key in MainChatView / iPadMainChatView.
+        //
+        // New chats (initialConversationId == nil) bypass the curtain entirely —
+        // there are no messages to position, so the welcome hero should render
+        // visible from frame 1 with no blank-screen flash.
+        .opacity((isContentReady || initialConversationId == nil) ? 1 : 0)
+        .blur(radius: (isContentReady || initialConversationId == nil) ? 0 : 8)
+        .animation(.easeOut(duration: 0.2), value: isContentReady)
 
         // FAB overlay — attached pill group: ↑ (top half) + ↓ (bottom half) when scrolled away from bottom.
         // Both appear together as one unit. ↑ is hidden when already at the very top.
@@ -1247,9 +1306,21 @@ struct ChatDetailView: View {
                 withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
                     scrollPosition.scrollTo(edge: .bottom)
                 }
+            } else if lastMessage?.role == .user {
+                // Animate the sent message gliding up to the top. Arm suppression
+                // first so the in-flight offset changes don't misfire the nav-bar /
+                // breakout observer while the spring is running.
+                _pumpRef.programmaticScrollUntil = Date().addingTimeInterval(0.7)
+                Task { @MainActor in
+                    // 80ms settle: gives the layout engine one pass to measure the
+                    // new bubble + empty assistant placeholder before the spring fires.
+                    try? await Task.sleep(nanoseconds: 80_000_000)
+                    withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
+                        scrollPosition.scrollTo(edge: .bottom)
+                    }
+                }
             }
-            // else: already at bottom — .defaultScrollAnchor(.bottom) handles new content
-            // silently. No explicit scroll needed (would fight the anchor and cause a jump).
+            // else: assistant addition already at bottom — .defaultScrollAnchor(.bottom) handles it.
         }
         // Streaming start/end: manage auto-scroll state.
         // When streaming STARTS with streamingAutoScroll enabled, re-engage and jump to bottom.
@@ -1260,8 +1331,12 @@ struct ChatDetailView: View {
         .onChange(of: viewModel.isStreaming) { oldStreaming, newStreaming in
             if newStreaming && streamingAutoScroll {
                 // Stream started — re-engage auto-scroll.
-                // Arm suppression window BEFORE scrollTo so the resulting offset
-                // change never triggers the nav bar hide/show logic.
+                // Use an instant snap (no withAnimation) so there is no in-flight
+                // Core Animation competing with the user's touch when they try to
+                // scroll up during streaming. The sent-message spring fired ~100ms
+                // earlier has already glided the question to the top; at this point
+                // the response placeholder is just appearing so the scroll distance
+                // is negligible and the instant jump is invisible.
                 isScrolledUp = false
                 isUserDriving = false
                 _pumpRef.programmaticScrollUntil = Date().addingTimeInterval(0.4)
@@ -1301,48 +1376,78 @@ struct ChatDetailView: View {
     private var scrollContent: some View {
         ScrollView {
             VStack(spacing: 0) {
-                if viewModel.isLoadingConversation {
-                    // A2: crossfade instead of hard-swap so the transition
-                    // between skeleton placeholders and real message content
-                    // is smooth and hides the single layout frame where
-                    // WKWebViews / MarkdownView first measure themselves.
-                    loadingPlaceholders
-                        .transition(.opacity)
-                } else {
-                    messagesList
-                        .transition(.opacity)
-                }
+                // Skeleton placeholders removed — the opacity curtain (isContentReady)
+                // already hides the area during loading, so there is no need to render
+                // and then crossfade out a skeleton. Showing only messagesList here
+                // eliminates the stutter caused by the VStack structural swap
+                // (4 skeleton rows → N message rows) that happened even under opacity 0.
+                messagesList
             }
-            .animation(.easeInOut(duration: 0.18), value: viewModel.isLoadingConversation)
             .padding(.top, 8)
             .padding(.bottom, 8)
             .frame(maxWidth: iPadMaxContentWidth)
             .frame(maxWidth: .infinity)
         }
+        // defaultScrollAnchor(.bottom): tells SwiftUI to render the ScrollView
+        // with its initial content offset at the bottom on first appearance.
+        // This is a one-shot initial-position hint — it does NOT continuously
+        // pin to the bottom during streaming (that's handled by the pump).
+        // Combined with the opacity curtain, the user sees the chat already at
+        // the bottom on reveal, with no programmatic scroll animation at all.
+        .defaultScrollAnchor(.bottom)
         .background(ScrollViewHorizontalLock())
         .scrollIndicators(.hidden)
         .scrollDismissesKeyboard(editingMessageId != nil ? .never : (viewModel.isStreaming ? .immediately : .interactively))
-        .defaultScrollAnchor(.bottom)
         .scrollPosition($scrollPosition)
         .onScrollPhaseChange { _, newPhase in
             isUserDriving = (newPhase == .interacting || newPhase == .decelerating)
         }
+        // ── Direct finger break-out ──────────────────────────────────────────
+        // When the glide animation is running the scroll phase is `.animating`,
+        // not `.interacting`, so isUserDriving never latches and the upward-drag
+        // breakout path in the offset handler never fires.  A simultaneous
+        // DragGesture side-steps the phase entirely: the moment the finger
+        // moves ≥4pt we set isUserDriving = true (stops the next glide tick)
+        // and, on an upward drag (positive height = moving down on screen =
+        // scrolling up through content), we set isScrolledUp = true directly.
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 4)
+                .onChanged { value in
+                    if !isUserDriving {
+                        isUserDriving = true
+                        // Lift the programmatic suppression window so the offset
+                        // handler immediately treats this as a genuine user scroll.
+                        _pumpRef.programmaticScrollUntil = .distantPast
+                    }
+                    // Positive height = finger moved down the screen = scrolling up.
+                    if value.translation.height > 8 && !isScrolledUp {
+                        isScrolledUp = true
+                    }
+                }
+        )
         .onScrollGeometryChange(for: CGPoint.self) { geo in
             geo.contentOffset
         } action: { oldOffset, newOffset in
             // Track raw offset for the ↑ FAB "find current question" logic.
-            currentScrollOffsetY = newOffset.y
+            // Written to _pumpRef (not @State) so this 120Hz write never causes a body re-eval.
+            _pumpRef.currentScrollOffsetY = newOffset.y
 
             let distanceFromBottom = max(0,
                 viewState_contentHeight - newOffset.y - viewState_containerHeight)
             let maxScrollOffset = max(0, viewState_contentHeight - viewState_containerHeight)
             let isBouncing = newOffset.y < 0 || (maxScrollOffset > 0 && newOffset.y > maxScrollOffset)
 
-            if distanceFromBottom <= 80 && !isBouncing {
+            // Arm the programmatic-scroll suppression flag once so all logic below shares it.
+            let programmaticActive = Date() < _pumpRef.programmaticScrollUntil
+
+            if distanceFromBottom <= 80 && !isBouncing && !programmaticActive && !viewModel.isStreaming {
                 // Scrolled to within 80pt of the bottom — re-engage auto-scroll and hide FABs.
                 // !isBouncing guard: during a bottom bounce newOffset.y overshoots maxScrollOffset,
                 // which clamps distanceFromBottom to 0 — without this guard it fires isScrolledUp=false
                 // which triggers scrollTo(edge:.bottom) via onChange and causes the "fighting" sensation.
+                // !programmaticActive guard: when the up-FAB shrinks windowEnd the content height
+                // drops momentarily, making distanceFromBottom look ≤ 80 even though we're still
+                // scrolled well into the conversation — suppression prevents the false reset.
                 if isScrolledUp {
                     isScrolledUp = false
                     userMessageJumpIndex = nil
@@ -1374,28 +1479,36 @@ struct ChatDetailView: View {
             // changes that hit the navDelta > 1 hide path and the old unconditional
             // "near-bottom → show" path, causing the visible pop/flash.
             //
-            // Always keep lastNavBarOffsetY in sync so the first real drag after a
-            // programmatic scroll gets a correct baseline delta.
-            let navSuppressed = Date() < _pumpRef.programmaticScrollUntil
-            let navDelta = newOffset.y - _pumpRef.lastNavBarOffsetY
-            _pumpRef.lastNavBarOffsetY = newOffset.y
+            // Nav-bar baseline and delta are only updated when NOT bouncing.
+            // During a bottom overscroll the offset oscillates rapidly around
+            // maxScrollOffset — updating lastNavBarOffsetY on every frame produces
+            // large spurious deltas that flicker the nav bar at 120 Hz (the
+            // "fighting / jittery" sensation when pushing past the bottom edge).
+            // Skipping the update while bouncing keeps the baseline frozen at the
+            // last stable in-bounds position, so the first post-bounce frame sees a
+            // near-zero delta and the nav bar stays completely still during overscroll.
+            if !isBouncing {
+                let navSuppressed = Date() < _pumpRef.programmaticScrollUntil
+                let navDelta = newOffset.y - _pumpRef.lastNavBarOffsetY
+                _pumpRef.lastNavBarOffsetY = newOffset.y
 
-            // Freeze nav bar during streaming — every streaming auto-scroll fires offset
-            // changes that would otherwise toggle the nav bar, causing the visible
-            // pop-in/pop-out the user reported. Only respond to genuine user drags.
-            if !navSuppressed && isUserDriving && !viewModel.isStreaming && !isBouncing {
-                if distanceFromBottom > 80 {
-                    if navDelta > 1 && !navBarHidden {
-                        // Scrolling down (away from bottom) — hide
-                        withAnimation(.easeInOut(duration: 0.2)) { navBarHidden = true }
-                    } else if navDelta < -1 && navBarHidden {
-                        // Scrolling up (back toward top) — show
-                        withAnimation(.easeInOut(duration: 0.2)) { navBarHidden = false }
-                    }
-                } else {
-                    // Near/at the bottom with real user scroll upward — show
-                    if navDelta < -1 && navBarHidden {
-                        withAnimation(.easeInOut(duration: 0.2)) { navBarHidden = false }
+                // Freeze nav bar during streaming — every streaming auto-scroll fires offset
+                // changes that would otherwise toggle the nav bar, causing the visible
+                // pop-in/pop-out the user reported. Only respond to genuine user drags.
+                if !navSuppressed && isUserDriving && !viewModel.isStreaming {
+                    if distanceFromBottom > 80 {
+                        if navDelta > 1 && !navBarHidden {
+                            // Scrolling down (away from bottom) — hide
+                            withAnimation(.easeInOut(duration: 0.2)) { navBarHidden = true }
+                        } else if navDelta < -1 && navBarHidden {
+                            // Scrolling up (back toward top) — show
+                            withAnimation(.easeInOut(duration: 0.2)) { navBarHidden = false }
+                        }
+                    } else {
+                        // Near/at the bottom with real user scroll upward — show
+                        if navDelta < -1 && navBarHidden {
+                            withAnimation(.easeInOut(duration: 0.2)) { navBarHidden = false }
+                        }
                     }
                 }
             }
@@ -1414,38 +1527,49 @@ struct ChatDetailView: View {
                     let fraction = max(0, min(1, newOffset.y / viewState_contentHeight))
                     let estimatedIdx = min(Int(fraction * CGFloat(allMsgs.count)), allMsgs.count - 1)
                     let newTopId = allMsgs[estimatedIdx].id
-                    if newTopId != topmostVisibleMessageId {
-                        topmostVisibleMessageId = newTopId
-                    }
+                    _pumpRef.topmostVisibleMessageId = newTopId
                 }
             }
 
-            // ── Sliding window: load older messages when near the top ──
+            // ── Sliding window: preload older messages when approaching the top ──
+            // Threshold raised to 600pt so the next batch mounts *before* the user
+            // reaches the edge — avoids the mid-momentum mount stutter.
+            // The window slide runs in a Task so the scroll-geometry callback returns
+            // immediately and never blocks scroll momentum.
+            // We deliberately do NOT re-anchor (scrollTo) after sliding — the window
+            // grows upward by prepending new rows, and the existing anchor row stays
+            // at the same logical position in the VStack, so the scroll offset is
+            // naturally preserved. A re-anchor mid-momentum would interrupt inertia.
             let total = viewModel.messages.count
             let effectiveEnd = windowEnd ?? total
             let effectiveStart = max(0, effectiveEnd - windowSize)
 
-            if newOffset.y < 200,
+            if newOffset.y < 600,
                !isLoadingMoreMessages,
+               !programmaticActive,
                effectiveStart > 0,
                !viewModel.isLoadingConversation {
-                // Bug 12: set isLoadingMoreMessages = true synchronously BEFORE the
-                // async dispatch so the streaming scroll handler sees it immediately
-                // and skips the bottom-scroll that would race with the anchor scroll.
+                // Set the guard synchronously so rapid geometry callbacks don't
+                // schedule multiple concurrent slides.
                 isLoadingMoreMessages = true
-                let anchorId = viewModel.messages[effectiveStart].id
-                let slideBy = min(5, effectiveStart)
 
-                // Detach from "pinned to latest" on first upward scroll
-                if windowEnd == nil { windowEnd = total }
+                // Capture everything needed before the async hop.
+                let capturedTotal = total
+                let capturedEffectiveStart = effectiveStart
 
-                // Slide window backwards: keep size capped, shift windowEnd so start moves up
-                windowSize = min(windowSize + slideBy, maxWindowSize)
-                let newStart = max(0, effectiveStart - slideBy)
-                windowEnd = min(newStart + windowSize, total)
+                Task { @MainActor in
+                    let slideBy = min(5, capturedEffectiveStart)
 
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                    scrollPosition.scrollTo(id: anchorId, anchor: .top)
+                    // Detach from "pinned to latest" on first upward scroll
+                    if windowEnd == nil { windowEnd = capturedTotal }
+
+                    // Slide window backwards: grow size up to cap, shift windowEnd
+                    windowSize = min(windowSize + slideBy, maxWindowSize)
+                    let newStart = max(0, capturedEffectiveStart - slideBy)
+                    windowEnd = min(newStart + windowSize, capturedTotal)
+
+                    // No re-anchor: rows are prepended at the top; the current
+                    // scroll offset already points past them, so no jump occurs.
                     isLoadingMoreMessages = false
                 }
             }
@@ -1454,6 +1578,7 @@ struct ChatDetailView: View {
             if let wEnd = windowEnd, wEnd < total,
                distanceFromBottom < 200,
                !isLoadingMoreMessages,
+               !programmaticActive,
                !viewModel.isLoadingConversation {
                 isLoadingMoreMessages = true
                 let anchorId = viewModel.messages[min(wEnd - 1, total - 1)].id
@@ -1479,29 +1604,43 @@ struct ChatDetailView: View {
                 viewState_containerHeight = newSize.height
             }
             // Streaming auto-follow:
-            // .defaultScrollAnchor(.bottom) + .scrollPosition(anchor:.bottom) pin the
-            // bottom edge as content grows. When a correction is needed, we snap instantly
-            // (no animation) so the viewport moves in the SAME frame as the new text
-            // appears. Wrapping this in withAnimation(.easeOut) caused the viewport to
-            // lag 0.18s behind the content, making the text and scroll move at different
-            // speeds — the "motion blur / motion sickness" smear the user reported.
+            // When a line wraps, the content height jumps by a full line (~20pt) in one
+            // layout pass. An instant snap turns every wrap into a hard step → "stutter".
+            // A single long animation re-introduces the old stacking problem.
             //
-            // The 24pt dead-band prevents sub-pixel noise from firing a correction on
-            // every floating-point rounding fluctuation in the geometry callback.
+            // Solution: rate-limited animated glide.
+            //   • Only issue one new scroll per 0.14 s (the glide duration).  Bursts of
+            //     line-advances inside that window are absorbed — the next allowed tick
+            //     animates straight to the newest bottom, so rapid wraps feel like one
+            //     continuous glide rather than 6 fighting animations.
+            //   • Use .easeOut(duration: 0.14) — long enough to look fluid, short enough
+            //     that the viewport never lags more than a fraction of a line behind.
+            //
+            // Guards:
+            //  - !isUserDriving: the instant a finger touches, following yields completely.
+            //  - !isScrolledUp: user already broke out manually.
+            //  - !isLoadingMoreMessages: don't fight the pagination anchor scroll.
+            //
+            // A 4pt dead-band prevents sub-pixel noise while keeping the follow glued.
             let contentHeight = newSize.width
             let containerHeight = newSize.height
-            let distFromBottom = max(0, contentHeight - containerHeight - currentScrollOffsetY)
-            let driftedFar = distFromBottom > 24
-            if driftedFar && viewModel.isStreaming && !isScrolledUp && !isLoadingMoreMessages {
-                // Short linear glide (~0.1s) smooths the per-line-quantum height jumps
-                // (~20pt each) without accumulating lag behind the text. Linear (not easeOut)
-                // ensures consecutive line-wraps chain into one continuous uniform slide.
-                // Arm suppression window so the animation's deceleration phase never
-                // falsely flips isScrolledUp = true via the offset observer.
-                _pumpRef.programmaticScrollUntil = Date().addingTimeInterval(0.15)
-                withAnimation(.linear(duration: 0.1)) {
-                    scrollPosition.scrollTo(edge: .bottom)
-                }
+            let distFromBottom = max(0, contentHeight - containerHeight - _pumpRef.currentScrollOffsetY)
+            let driftedFar = distFromBottom > 4
+            if driftedFar && viewModel.isStreaming && !isUserDriving && !isScrolledUp && !isLoadingMoreMessages {
+                let now = Date()
+                // Rate-limit: only issue one scroll per 16ms to match the drain timer cadence.
+                // Use a fixed 0.016s interval — no animation duration needed since we snap instantly.
+                guard now.timeIntervalSince(_pumpRef.lastScrollTime) >= 0.016 else { return }
+                _pumpRef.lastScrollTime = now
+                // Suppress nav-bar / breakout logic for a brief window so this instant
+                // offset change doesn't falsely trip the direction-based hide/show logic.
+                // 0.06s is enough for one geometry callback to fire and settle.
+                _pumpRef.programmaticScrollUntil = now.addingTimeInterval(0.06)
+                // Instant snap — no withAnimation. The typewriter drain (60Hz character reveal)
+                // already provides all the visual smoothness needed. An animated scroll on top
+                // creates a competing Core Animation that fights the user's finger when they
+                // try to scroll up during streaming.
+                scrollPosition.scrollTo(edge: .bottom)
             }
         }
     }
@@ -1532,37 +1671,62 @@ struct ChatDetailView: View {
                                 targetIdx = userIndices.first!
                             }
                         } else {
-                            // First tap: find the user message whose index is at or just above
-                            // the current viewport top. We estimate the message index linearly
-                            // from the scroll offset — good enough for direction, not pixel-perfect.
-                            // total here is the full message count (allMessages.count), not the window.
-                            let estimatedMsgIdx: Int = {
+                            // First tap: use topmostVisibleMessageId (updated continuously by
+                            // the scroll-offset handler) as the reference — version-agnostic
+                            // and accurate regardless of window size or message branching.
+                            let refIdx: Int = {
+                                if let topId = _pumpRef.topmostVisibleMessageId,
+                                   let idx = allMessages.firstIndex(where: { $0.id == topId }) {
+                                    return idx
+                                }
+                                // Fallback: linear fraction estimate
                                 guard viewState_contentHeight > 0 else { return allMessages.count - 1 }
-                                let fraction = currentScrollOffsetY / viewState_contentHeight
+                                let fraction = _pumpRef.currentScrollOffsetY / viewState_contentHeight
                                 return Int(fraction * CGFloat(allMessages.count))
                             }()
-                            // Find the last user message at or before the estimated viewport top.
+                            // Find the last user message at or before the reference index.
                             // This is the "current context" question — the one whose answer
                             // the user is likely reading.
-                            if let pos = userIndices.lastIndex(where: { $0 <= estimatedMsgIdx }) {
+                            if let pos = userIndices.lastIndex(where: { $0 <= refIdx }) {
                                 targetIdx = userIndices[pos]
                             } else {
-                                // Estimated index is before any user message — jump to first
+                                // Reference index is before any user message — jump to first
                                 targetIdx = userIndices.first!
                             }
                         }
                         userMessageJumpIndex = targetIdx
 
-                        // Expand the window to include this message if needed
+                        // Expand the window to include this message if needed.
+                        // IMPORTANT: arm programmaticScrollUntil BEFORE mutating windowEnd/windowSize.
+                        // The window mutation drops the newest messages from the rendered list, which
+                        // causes a momentary content-height drop. Without suppression the geometry
+                        // callback interprets that as "scrolled to bottom" and fires isScrolledUp=false,
+                        // hiding the FABs and nulling userMessageJumpIndex. 0.8s covers the 30ms defer
+                        // plus the full 0.45s spring settle plus layout stabilisation margin.
                         let total = allMessages.count
-                        if windowEnd != nil || targetIdx < max(0, (windowEnd ?? total) - windowSize) {
+                        let currentEffectiveStart = max(0, (windowEnd ?? total) - windowSize)
+                        let needsExpand = targetIdx < currentEffectiveStart
+                        // Suppress the geometry handler for all programmatic jumps (expand or not) so
+                        // the spring animation offset never falsely trips the near-bottom reset.
+                        _pumpRef.programmaticScrollUntil = Date().addingTimeInterval(0.8)
+                        if needsExpand {
                             windowEnd = min(targetIdx + windowSize, total)
                             if windowEnd! > total { windowEnd = nil }
                             windowSize = min(maxWindowSize, total)
-                        }
-
-                        withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) {
-                            scrollPosition.scrollTo(id: allMessages[targetIdx].id, anchor: UnitPoint(x: 0.5, y: 0))
+                            // Defer scroll by one tick so newly-mounted rows are in the
+                            // view hierarchy before scrollTo(id:) fires — otherwise it
+                            // silently no-ops on IDs not yet rendered.
+                            let targetId = allMessages[targetIdx].id
+                            Task { @MainActor in
+                                try? await Task.sleep(nanoseconds: 30_000_000) // 30ms
+                                withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) {
+                                    scrollPosition.scrollTo(id: targetId, anchor: UnitPoint(x: 0.5, y: 0))
+                                }
+                            }
+                        } else {
+                            withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) {
+                                scrollPosition.scrollTo(id: allMessages[targetIdx].id, anchor: UnitPoint(x: 0.5, y: 0))
+                            }
                         }
                         Haptics.play(.light)
                     } label: {
@@ -1601,8 +1765,15 @@ struct ChatDetailView: View {
                         _pumpRef.programmaticScrollUntil = Date().addingTimeInterval(0.1)
                         scrollPosition.scrollTo(edge: .bottom)
                     } else {
-                        _pumpRef.programmaticScrollUntil = Date().addingTimeInterval(0.5)
+                        _pumpRef.programmaticScrollUntil = Date().addingTimeInterval(0.6)
                         withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) {
+                            scrollPosition.scrollTo(edge: .bottom)
+                        }
+                        // Settle correction: heavy bottom messages may not be fully measured
+                        // when the spring fires, so the spring targets a position that's short
+                        // of the true bottom. Re-snap to the real bottom after heights settle.
+                        Task { @MainActor in
+                            try? await Task.sleep(nanoseconds: 400_000_000) // 400ms settle
                             scrollPosition.scrollTo(edge: .bottom)
                         }
                     }
@@ -2139,8 +2310,11 @@ struct ChatDetailView: View {
 
     // MARK: - Welcome View
 
-    private struct SuggestedPrompt: Identifiable {
-        let id = UUID()
+    private struct SuggestedPrompt: Identifiable, Hashable {
+        /// Stable, content-derived ID so SwiftUI never treats an identical card as a new view.
+        /// Using a random UUID() caused every re-resolve to look like all-new items, triggering
+        /// insertion animations (left-to-right slide) even when the text was the same.
+        var id: String { "\(title)|\(subtitle)" }
         let title: String
         let subtitle: String
         private let _fullText: String?
@@ -2210,78 +2384,83 @@ struct ChatDetailView: View {
 
                 // ── Hero: avatar + greeting ──
                 VStack(spacing: Spacing.sm) {
-                ZStack {
-                    if let model = viewModel.selectedModel {
-                        ModelAvatar(
-                            size: 52,
-                            imageURL: viewModel.resolvedImageURL(for: model),
-                            label: model.shortName,
-                            authToken: viewModel.serverAuthToken
-                        )
-                        .transition(.scale.combined(with: .opacity))
-                    } else {
-                        ModelAvatar(size: 52, label: nil)
-                            .transition(.scale.combined(with: .opacity))
-                    }
-                }
-
-                VStack(spacing: 4) {
-                    Text("How can I help?")
-                        .scaledFont(size: 24, weight: .bold)
-                        .foregroundStyle(theme.textPrimary)
-
-                    if let model = viewModel.selectedModel {
-                        Text(model.shortName)
-                            .scaledFont(size: 13, weight: .medium)
-                            .foregroundStyle(theme.textTertiary)
-                    }
-                }
-
-                if viewModel.isTemporaryChat {
-                    HStack(spacing: 5) {
-                        Image(systemName: "eye.slash.fill")
-                            .scaledFont(size: 10, weight: .semibold)
-                        Text("Temporary Chat")
-                            .scaledFont(size: 11, weight: .semibold)
-                    }
-                    .foregroundStyle(theme.warning)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(theme.warning.opacity(0.1))
-                    .clipShape(Capsule())
-                }
-            }
-
-            // ── Suggested prompt cards ──
-            // Only shown when the server has configured suggestions.
-            // If the admin clears all suggestions (or the server doesn't
-            // return any), this entire block is hidden and the welcome
-            // screen shows only the hero avatar + "How can I help?".
-            if !randomPrompts.isEmpty {
-                Spacer().frame(height: 32)
-
-                // Adaptive grid: 2-col iPhone, 4-col iPad
-                let cols = promptColumnCount
-                let rows = stride(from: 0, to: randomPrompts.count, by: cols).map { i in
-                    Array(randomPrompts[i..<min(i + cols, randomPrompts.count)])
-                }
-                VStack(spacing: 10) {
-                    ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                        HStack(spacing: 10) {
-                            ForEach(row) { prompt in
-                                promptCard(prompt)
-                            }
-                            // Fill empty slots if row has fewer items than column count
-                            ForEach(0..<(cols - row.count), id: \.self) { _ in
-                                Color.clear
-                                    .frame(maxWidth: .infinity)
-                            }
+                    // Avatar — suppress all implicit animations so model-image
+                    // loading never plays a scale/fade pop on the welcome screen.
+                    Group {
+                        if let model = viewModel.selectedModel {
+                            ModelAvatar(
+                                size: 52,
+                                imageURL: viewModel.resolvedImageURL(for: model),
+                                label: model.shortName,
+                                authToken: viewModel.serverAuthToken
+                            )
+                        } else {
+                            ModelAvatar(size: 52, label: nil)
                         }
-                        .padding(.horizontal, Spacing.screenPadding)
+                    }
+                    .animation(nil, value: viewModel.selectedModel?.id)
+                    .transaction { $0.animation = nil }
+
+                    VStack(spacing: 4) {
+                        Text("How can I help?")
+                            .scaledFont(size: 24, weight: .bold)
+                            .foregroundStyle(theme.textPrimary)
+
+                        if let model = viewModel.selectedModel {
+                            Text(model.shortName)
+                                .scaledFont(size: 13, weight: .medium)
+                                .foregroundStyle(theme.textTertiary)
+                        }
+                    }
+
+                    if viewModel.isTemporaryChat {
+                        HStack(spacing: 5) {
+                            Image(systemName: "eye.slash.fill")
+                                .scaledFont(size: 10, weight: .semibold)
+                            Text("Temporary Chat")
+                                .scaledFont(size: 11, weight: .semibold)
+                        }
+                        .foregroundStyle(theme.warning)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(theme.warning.opacity(0.1))
+                        .clipShape(Capsule())
                     }
                 }
-                .frame(maxWidth: iPadMaxContentWidth)
-            }
+
+                // ── Suggested prompt cards ──
+                // Only shown when the server has configured suggestions.
+                // If the admin clears all suggestions (or the server doesn't
+                // return any), this entire block is hidden and the welcome
+                // screen shows only the hero avatar + "How can I help?".
+                if !randomPrompts.isEmpty {
+                    Spacer().frame(height: 32)
+
+                    // Adaptive grid: 2-col iPhone, 4-col iPad
+                    let cols = promptColumnCount
+                    let rows = stride(from: 0, to: randomPrompts.count, by: cols).map { i in
+                        Array(randomPrompts[i..<min(i + cols, randomPrompts.count)])
+                    }
+                    VStack(spacing: 10) {
+                        ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                            HStack(spacing: 10) {
+                                ForEach(row) { prompt in
+                                    promptCard(prompt)
+                                }
+                                // Fill empty slots if row has fewer items than column count
+                                ForEach(0..<(cols - row.count), id: \.self) { _ in
+                                    Color.clear
+                                        .frame(maxWidth: .infinity)
+                                }
+                            }
+                            .padding(.horizontal, Spacing.screenPadding)
+                        }
+                    }
+                    .frame(maxWidth: iPadMaxContentWidth)
+                    // Suppress insertion/removal animations on the prompt grid —
+                    // cards should appear instantly, not fly in from the side.
+                    .transaction { $0.animation = nil }
+                }
 
                 Spacer(minLength: 60).layoutPriority(1)
             }
@@ -3070,11 +3249,12 @@ struct ChatDetailView: View {
         // Only resolve prompts pre-load for new chats — existing chats
         // already have a model; we'll resolve after load() below (D10 fix).
         if viewModel.isNewConversation {
-            randomPrompts = Self.resolvePromptSuggestions(
+            let preLoadPrompts = Self.resolvePromptSuggestions(
                 adminSuggestions: dependencies.authViewModel.backendConfig?.defaultPromptSuggestions,
                 modelSuggestions: viewModel.selectedModel?.suggestionPrompts,
                 count: promptCardCount
             )
+            withTransaction(\.animation, nil) { randomPrompts = preLoadPrompts }
         }
         NotificationService.shared.activeConversationId =
             viewModel.conversationId ?? viewModel.conversation?.id
@@ -3084,35 +3264,87 @@ struct ChatDetailView: View {
         if loadedCount > 0 {
             isScrolledUp = false
             windowEnd = nil
-            windowSize = min(maxWindowSize, loadedCount)
-            // Suppress the content-height-driven streaming scroll while
-            // WKWebViews, MarkdownView, and other expensive blocks finish
-            // their first layout pass. The pump interval is 400 ms; adding
-            // a 500 ms offset gives ~900 ms total dead-zone — enough for
-            // WKWebViews on older devices to report their rendered heights
-            // via JS postMessage without triggering scroll position jumps
-            // (A3 fix, extended for lazy WKWebView init).
+            // Start with a small window (last ~8 rows). The minHeight trick on the
+            // last user→assistant turn (windowIncludesEnd) already stretches that
+            // last turn to fill the full viewport, so 8 rows is more than enough to
+            // land exactly on the true last message with no visible scroll.
+            // Keeping the window small avoids synchronously instantiating all heavy
+            // rows (WKWebView, MarkdownView, Litext) during cold-start.
+            // Window growth happens on-demand via the scroll-up pagination handler
+            // in scrollContent (onScrollGeometryChange / newOffset.y < 600), which
+            // prepends rows while the user is actively scrolling up — that path
+            // preserves scroll position correctly and never strands the user.
+            windowSize = min(8, loadedCount)
+            // Keep pump suppression armed — the settle loop below will extend it.
             _pumpRef.lastScrollTime = Date().addingTimeInterval(0.5)
-            // Scroll to bottom after load so that re-opened chats always start at
-            // the latest message. The .onAppear scrollTo (in messageListArea) fires
-            // before content height is known when the VM already has cached messages,
-            // making it a no-op. onChange(of: messages.count) never fires because the
-            // cached VM's count didn't change. A short settle delay matches the same
-            // approach used in the first-open (old == 0) branch of onChange(of: messages.count).
+            // Fix B — Settle loop: repeatedly snap to .bottom and watch the content
+            // height until it stops changing (WKWebViews / MarkdownView heights have
+            // all been reported) before lifting the curtain. A fixed delay is
+            // inherently unreliable because async height callbacks can arrive at any
+            // time; polling for stability is the only race-free approach.
+            // The whole loop runs behind the opacity+blur curtain so the user never
+            // sees any scroll movement — they are revealed already at the true bottom.
             Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 150_000_000) // 150ms layout settle
-                _pumpRef.programmaticScrollUntil = Date().addingTimeInterval(0.4)
+                // Keep pump suppression armed for the full settle period.
+                let settleDeadline = Date().addingTimeInterval(1.5) // hard cap 1.5 s
+                _pumpRef.programmaticScrollUntil = settleDeadline
+                _pumpRef.lastScrollTime = settleDeadline
+
+                var lastHeight: CGFloat = 0
+                var stableTickCount = 0
+                let requiredStableTicks = 2  // 2 consecutive unchanged heights = settled
+                let tickInterval: UInt64 = 80_000_000 // 80 ms per tick
+
+                // Initial snap — fires before the first layout pass so
+                // .defaultScrollAnchor(.bottom) always has a partner snap.
                 scrollPosition.scrollTo(edge: .bottom)
+
+                while Date() < settleDeadline {
+                    try? await Task.sleep(nanoseconds: tickInterval)
+                    scrollPosition.scrollTo(edge: .bottom)
+                    let currentHeight = viewState_contentHeight
+                    if abs(currentHeight - lastHeight) < 1 && currentHeight > 0 {
+                        stableTickCount += 1
+                        if stableTickCount >= requiredStableTicks { break }
+                    } else {
+                        stableTickCount = 0
+                        lastHeight = currentHeight
+                    }
+                }
+
+                // One final authoritative snap after heights have stabilised.
+                scrollPosition.scrollTo(edge: .bottom)
+                // Lift the curtain — user sees the chat already at the true bottom.
+                // Window remains at 8 rows — the scroll-up pagination handler in
+                // scrollContent grows it on-demand as the user scrolls up, which
+                // preserves scroll position correctly (prepends above viewport).
+                isContentReady = true
             }
+        } else {
+            // New chat (no messages) — welcome screen, nothing to scroll.
+            // Reveal immediately so the input field and hero appear instantly.
+            isContentReady = true
         }
         await viewModel.fetchPinnedModels()
-        // Rebuild prompts after load() — models are now fetched with fresh
-        // suggestion_prompts from the server.
-        randomPrompts = Self.resolvePromptSuggestions(
-            adminSuggestions: dependencies.authViewModel.backendConfig?.defaultPromptSuggestions,
-            modelSuggestions: viewModel.selectedModel?.suggestionPrompts,
-            count: promptCardCount
-        )
+        // After fetchPinnedModels(), only rebuild prompts when they are still
+        // empty (e.g. backendConfig wasn't ready on the first call) OR when the
+        // selected model has per-model suggestion_prompts that differ from what
+        // the pre-load resolve returned. This prevents the double-shuffle flicker
+        // where the first resolve picks 4 random cards and this second resolve
+        // immediately picks 4 *different* random cards, causing a left-to-right
+        // slide animation as all card text changes at once.
+        let newModelSuggestions = viewModel.selectedModel?.suggestionPrompts
+        let hasModelSuggestions = !(newModelSuggestions?.isEmpty ?? true)
+        // Only re-resolve if: prompts are empty (first-launch timing) OR the
+        // model now has per-model suggestions (which override admin suggestions).
+        if randomPrompts.isEmpty || hasModelSuggestions {
+            let postLoadPrompts = Self.resolvePromptSuggestions(
+                adminSuggestions: dependencies.authViewModel.backendConfig?.defaultPromptSuggestions,
+                modelSuggestions: newModelSuggestions,
+                count: promptCardCount
+            )
+            withTransaction(\.animation, nil) { randomPrompts = postLoadPrompts }
+        }
     }
 
     private func handleDisappear() {
