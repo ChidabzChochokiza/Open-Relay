@@ -142,8 +142,10 @@ final class UpdateChecker {
     // MARK: - Private Helpers
 
     private func fetchAppStoreResult() async throws -> ITunesAppResult? {
-        var request = URLRequest(url: Self.lookupURL, timeoutInterval: 10)
+        var request = URLRequest(url: Self.lookupURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 10)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        request.setValue("no-cache", forHTTPHeaderField: "Pragma")
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }

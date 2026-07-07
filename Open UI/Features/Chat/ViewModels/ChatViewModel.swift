@@ -2395,6 +2395,47 @@ final class ChatViewModel {
     /// Task for the external stream polling loop.
     private var externalStreamPollTask: Task<Void, Never>?
 
+    // MARK: - Model-Switch Status Polling (issue #79)
+
+    /// Live status from the per-server switch-status endpoint.
+    /// Non-nil only while a model switch is in progress. Cleared by stopSwitchStatusPolling().
+    var modelSwitchStatus: ModelSwitchStatus?
+
+    /// Background polling task — cancelled as soon as the first SSE token arrives or streaming ends.
+    private var switchPollingTask: Task<Void, Never>?
+
+    /// Starts polling the server's model-switch status URL every 1 s.
+    /// No-op when `switchStatusURL` is nil or empty on the active server.
+    private func startSwitchStatusPolling() {
+        guard let switchURL = manager?.apiClient.network.serverConfig.switchStatusURL,
+              !switchURL.isEmpty else { return }
+        switchPollingTask?.cancel()
+        switchPollingTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let apiClient = self.manager?.apiClient
+            while !Task.isCancelled {
+                if let status = await apiClient?.fetchModelSwitchStatus(url: switchURL) {
+                    if status.isSwitching {
+                        self.modelSwitchStatus = status
+                    } else {
+                        // Switch finished — clear banner and stop polling
+                        self.modelSwitchStatus = nil
+                        self.switchPollingTask?.cancel()
+                        return
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 s
+            }
+        }
+    }
+
+    /// Cancels the polling task and clears the banner.
+    private func stopSwitchStatusPolling() {
+        switchPollingTask?.cancel()
+        switchPollingTask = nil
+        modelSwitchStatus = nil
+    }
+
     /// Starts a polling loop that fetches conversation content from the server
     /// every 1.5 seconds during an external stream. The server persists streamed
     /// content to the database in real-time, so each poll gets the latest
@@ -2879,6 +2920,10 @@ final class ChatViewModel {
         socketHasReceivedContent = false
         selfInitiatedStream = true
         streamingSessionId += 1
+
+        // Start model-switch polling if a switchStatusURL is configured.
+        // Stopped automatically when the first SSE token arrives or streaming ends.
+        startSwitchStatusPolling()
 
         // Activate the isolated streaming store so token updates bypass
         // conversation.messages and only invalidate the streaming message view.
@@ -4622,6 +4667,7 @@ final class ChatViewModel {
 
     private func cleanupStreaming() {
         guard !hasFinishedStreaming else { return }
+        stopSwitchStatusPolling()
         hasFinishedStreaming = true
         isStreaming = false
         isExternallyStreaming = false

@@ -1,5 +1,21 @@
 # Changelog
 
+## v4.14 — July 7, 2026
+
+### What's New
+- Added URL scheme support — open a new chat from Raycast, Shortcuts, Obsidian, or any app using `openui://new-chat?prompt=Hello&model=gpt-4o&send=true`.
+- Added "Ask Open Relay" Shortcuts action — create a new chat with a prompt, optional model, and auto-send directly from Apple Shortcuts. This is a start and will be expanded upon for more usability.
+- Added model-switch progress banner for SGLang and OpenAI-compatible backends — when a status URL is configured per-server, a banner shows "Loading qwen3-35b ~42s left" while the model loads.
+
+### Improvements
+- Enhanced image and file attachment previews: images now display inlined in chat above the text bubble 
+
+### Bug Fixes
+- Fixed occasional app freezing on launch when a large chat was previously open.
+- Fixed update notification not appearing instantly after a new version is released on the App Store.
+- Fixed "Check for Updates" and "Check for Server Updates" buttons showing "Up to date" (green) after dismissing an update dialogue, even when an update is available.
+
+
 ## v4.13.1 — July 7, 2026
 
 ### Improvements

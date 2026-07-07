@@ -915,6 +915,15 @@ struct ChatDetailView: View {
                 ))
             }
 
+            // ── Model-Switch Banner (above input field, issue #79) ──
+            if let switchStatus = vm.modelSwitchStatus, switchStatus.isSwitching {
+                ModelSwitchBannerView(status: switchStatus)
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .bottom).combined(with: .opacity),
+                        removal: .opacity
+                    ))
+            }
+
             // ── Task List Panel (above input field) ──
             if !vm.tasks.isEmpty {
                 TaskListView(
@@ -1940,6 +1949,20 @@ struct ChatDetailView: View {
                 )
             }
 
+            // ── User images (rendered ABOVE the text bubble, outside it) ──
+            if message.role == .user {
+                let userVIdxRow = activeUserVersionIndex[message.id] ?? -1
+                let userImgFiles: [ChatMessageFile] = {
+                    if userVIdxRow >= 0 && userVIdxRow < message.versions.count {
+                        return message.versions[userVIdxRow].files.filter { isImageFile($0) }
+                    }
+                    return message.files.filter { isImageFile($0) }
+                }()
+                if !userImgFiles.isEmpty {
+                    userImageMosaicGrid(imageFiles: userImgFiles)
+                }
+            }
+
             // ── Message bubble / content ──
             messageBubble(for: message, isLastAssistant: isLastAssistant)
 
@@ -2162,31 +2185,25 @@ struct ChatDetailView: View {
                 return message.files
             }()
 
-            VStack(alignment: .trailing, spacing: Spacing.sm) {
-                // Inline images inside the bubble
-                let imageFiles = displayFiles.filter { $0.type == "image" }
-                if !imageFiles.isEmpty {
-                    ForEach(Array(imageFiles.prefix(4).enumerated()), id: \.offset) { _, file in
-                        if let fileId = file.url, !fileId.isEmpty {
-                            AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
-                                .frame(maxWidth: 220, maxHeight: 220)
-                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            // Non-image file cards + text content
+            // Images are rendered ABOVE the bubble in messageRow — not inside it.
+            let nonImageFiles = displayFiles.filter { !isImageFile($0) && $0.type != "collection" && $0.type != "folder" }
+            let hasText = !displayContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+
+            if hasText || !nonImageFiles.isEmpty {
+                VStack(alignment: .trailing, spacing: Spacing.sm) {
+                    // Non-image file cards inside the bubble
+                    if !nonImageFiles.isEmpty {
+                        ForEach(Array(nonImageFiles.enumerated()), id: \.offset) { _, file in
+                            fileAttachmentCard(file: file)
                         }
                     }
-                }
 
-                // Non-image file cards inside the bubble
-                let nonImageFiles = displayFiles.filter { $0.type != "image" && $0.type != "collection" && $0.type != "folder" }
-                if !nonImageFiles.isEmpty {
-                    ForEach(Array(nonImageFiles.enumerated()), id: \.offset) { _, file in
-                        fileAttachmentCard(file: file)
+                    // Text content
+                    if hasText {
+                        UserMessageContentView(content: displayContent)
+                            .lineSpacing(2)
                     }
-                }
-
-                // Text content
-                if !displayContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    UserMessageContentView(content: displayContent)
-                        .lineSpacing(2)
                 }
             }
         } else {
@@ -2876,24 +2893,12 @@ struct ChatDetailView: View {
 
     @ViewBuilder
     private func userAttachmentImages(for message: ChatMessage) -> some View {
-        let imageFiles = message.files.filter { $0.type == "image" }
-        let nonImageFiles = message.files.filter { $0.type != "image" }
+        let imageFiles = message.files.filter { isImageFile($0) }
+        let nonImageFiles = message.files.filter { !isImageFile($0) }
 
         VStack(alignment: .trailing, spacing: Spacing.xs) {
             if !imageFiles.isEmpty {
-                HStack(spacing: Spacing.sm) {
-                    Spacer()
-                    ForEach(Array(imageFiles.prefix(4).enumerated()), id: \.offset) { _, file in
-                        if let fileId = file.url, !fileId.isEmpty {
-                            AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
-                                .frame(
-                                    maxWidth: imageFiles.count == 1 ? 200 : 100,
-                                    maxHeight: imageFiles.count == 1 ? 200 : 100
-                                )
-                                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
-                        }
-                    }
-                }
+                userImageMosaicGrid(imageFiles: imageFiles)
             }
             if !nonImageFiles.isEmpty {
                 HStack(spacing: Spacing.sm) {
@@ -2904,6 +2909,159 @@ struct ChatDetailView: View {
                 }
             }
         }
+    }
+
+    /// Smart mosaic grid for user-sent images:
+    /// - 1 image: full-width up to 260pt
+    /// - 2 images: side-by-side
+    /// - 3 images: one large left + two stacked right
+    /// - 4+ images: 2×2 grid with +N overflow badge on last tile
+    @ViewBuilder
+    private func userImageMosaicGrid(imageFiles: [ChatMessageFile]) -> some View {
+        let shown = imageFiles.prefix(4)
+        let overflow = imageFiles.count - 4
+
+        HStack(spacing: 0) {
+            Spacer(minLength: 64)
+
+            let tileCorner: CGFloat = 14
+            let gap: CGFloat = 3
+
+            Group {
+                switch imageFiles.count {
+                case 1:
+                    // Single: full-width up to 260, natural aspect ratio
+                    if let fileId = shown[0].url, !fileId.isEmpty {
+                        AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
+                            .frame(maxWidth: 260, maxHeight: 300)
+                            .clipShape(RoundedRectangle(cornerRadius: tileCorner, style: .continuous))
+                    }
+
+                case 2:
+                    // Two side-by-side
+                    HStack(spacing: gap) {
+                        ForEach(Array(shown.enumerated()), id: \.offset) { idx, file in
+                            if let fileId = file.url, !fileId.isEmpty {
+                                AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
+                                    .scaledToFill()
+                                    .frame(width: 126, height: 126)
+                                    .clipped()
+                                    .clipShape(
+                                        .rect(
+                                            topLeadingRadius: idx == 0 ? tileCorner : 0,
+                                            bottomLeadingRadius: idx == 0 ? tileCorner : 0,
+                                            bottomTrailingRadius: idx == 1 ? tileCorner : 0,
+                                            topTrailingRadius: idx == 1 ? tileCorner : 0
+                                        )
+                                    )
+                            }
+                        }
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: tileCorner, style: .continuous))
+
+                case 3:
+                    // Large left + two stacked right
+                    HStack(spacing: gap) {
+                        if let fileId = shown[0].url, !fileId.isEmpty {
+                            AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
+                                .scaledToFill()
+                                .frame(width: 168, height: 168)
+                                .clipped()
+                                .clipShape(
+                                    .rect(
+                                        topLeadingRadius: tileCorner,
+                                        bottomLeadingRadius: tileCorner,
+                                        bottomTrailingRadius: 0,
+                                        topTrailingRadius: 0
+                                    )
+                                )
+                        }
+                        VStack(spacing: gap) {
+                            ForEach([1, 2], id: \.self) { idx in
+                                if let fileId = shown[idx].url, !fileId.isEmpty {
+                                    AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
+                                        .scaledToFill()
+                                        .frame(width: 82, height: 82)
+                                        .clipped()
+                                        .clipShape(
+                                            .rect(
+                                                topLeadingRadius: 0,
+                                                bottomLeadingRadius: 0,
+                                                bottomTrailingRadius: idx == 2 ? tileCorner : 0,
+                                                topTrailingRadius: idx == 1 ? tileCorner : 0
+                                            )
+                                        )
+                                }
+                            }
+                        }
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: tileCorner, style: .continuous))
+
+                default:
+                    // 4+ images: 2×2 grid with overflow badge
+                    VStack(spacing: gap) {
+                        HStack(spacing: gap) {
+                            ForEach([0, 1], id: \.self) { idx in
+                                if let fileId = shown[idx].url, !fileId.isEmpty {
+                                    AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
+                                        .scaledToFill()
+                                        .frame(width: 126, height: 126)
+                                        .clipped()
+                                        .clipShape(
+                                            .rect(
+                                                topLeadingRadius: idx == 0 ? tileCorner : 0,
+                                                bottomLeadingRadius: 0,
+                                                bottomTrailingRadius: 0,
+                                                topTrailingRadius: idx == 1 ? tileCorner : 0
+                                            )
+                                        )
+                                }
+                            }
+                        }
+                        HStack(spacing: gap) {
+                            ForEach([2, 3], id: \.self) { idx in
+                                if let fileId = shown[idx].url, !fileId.isEmpty {
+                                    ZStack {
+                                        AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
+                                            .scaledToFill()
+                                            .frame(width: 126, height: 126)
+                                            .clipped()
+                                            .clipShape(
+                                                .rect(
+                                                    topLeadingRadius: 0,
+                                                    bottomLeadingRadius: idx == 2 ? tileCorner : 0,
+                                                    bottomTrailingRadius: idx == 3 ? tileCorner : 0,
+                                                    topTrailingRadius: 0
+                                                )
+                                            )
+
+                                        // Overflow badge on tile 4 (idx == 3)
+                                        if idx == 3 && overflow > 0 {
+                                            Color.black.opacity(0.55)
+                                                .frame(width: 126, height: 126)
+                                                .clipShape(
+                                                    .rect(
+                                                        topLeadingRadius: 0,
+                                                        bottomLeadingRadius: 0,
+                                                        bottomTrailingRadius: tileCorner,
+                                                        topTrailingRadius: 0
+                                                    )
+                                                )
+                                            Text("+\(overflow)")
+                                                .scaledFont(size: 22, weight: .bold)
+                                                .foregroundStyle(.white)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: tileCorner, style: .continuous))
+                }
+            }
+        }
+        .padding(.horizontal, Spacing.screenPadding)
+        .padding(.vertical, 2)
     }
 
     private func fileAttachmentCard(file: ChatMessageFile) -> some View {
@@ -2946,6 +3104,21 @@ struct ChatDetailView: View {
             )
         }
         .buttonStyle(.plain)
+    }
+
+    /// Returns true if a ChatMessageFile represents an image, regardless of whether
+    /// the server stored it with type "image" or type "file" + an image contentType.
+    private func isImageFile(_ file: ChatMessageFile) -> Bool {
+        if file.type == "image" { return true }
+        if let ct = file.contentType, ct.hasPrefix("image/") { return true }
+        // Fallback: check file extension from name
+        if let name = file.name ?? file.url {
+            let ext = (name as NSString).pathExtension.lowercased()
+            if ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp", "tiff", "tif"].contains(ext) {
+                return true
+            }
+        }
+        return false
     }
 
     private func fileIconName(for ext: String) -> String {
@@ -5060,21 +5233,24 @@ private extension View {
 
 // MARK: - Share Extension Handlers (Type-Checker Relief)
 
-/// Handles both the plain-text pre-fill and the web-scraping URL pipeline
-/// from the Share Extension. Extracted from body so the Swift type-checker
-/// doesn't have to resolve these two `.onChange` closures inline.
+/// Handles plain-text pre-fill, web-scraping URL pipeline, model override,
+/// and auto-send from the Share Extension and URL scheme deep-links.
+/// Extracted from body so the Swift type-checker doesn't have to resolve
+/// these `.onChange` closures inline.
 private extension View {
     func applyShareExtensionHandlers(
         dependencies: AppDependencyContainer,
         viewModel: ChatViewModel
     ) -> some View {
         self
+            // --- Plain-text pre-fill (Share Extension + openui://new-chat?prompt=) ---
             .onChange(of: dependencies.pendingIncomingTextVersion) { _, _ in
                 if let text = dependencies.pendingIncomingText, !text.isEmpty {
                     viewModel.inputText = text
                     dependencies.pendingIncomingText = nil
                 }
             }
+            // --- Web-scraping URL pipeline (Share Extension) ---
             .onChange(of: dependencies.pendingIncomingWebURLsVersion) { _, _ in
                 let urls = dependencies.pendingIncomingWebURLs
                 if !urls.isEmpty {
@@ -5082,6 +5258,45 @@ private extension View {
                     for urlString in urls {
                         viewModel.processWebURL(urlString: urlString)
                     }
+                }
+            }
+            // --- Model override (openui://new-chat?model=) ---
+            // Only applied on new chats (initialConversationId == nil) so the URL
+            // scheme can't silently hijack an existing conversation's model.
+            .onChange(of: dependencies.pendingIncomingModelVersion) { _, _ in
+                if let modelId = dependencies.pendingIncomingModelId, !modelId.isEmpty {
+                    dependencies.pendingIncomingModelId = nil
+                    // Validate against the available models list; fall back silently
+                    // if the requested model doesn't exist on this server.
+                    if viewModel.availableModels.contains(where: { $0.id == modelId }) {
+                        viewModel.selectedModelId = modelId
+                    }
+                    // If models haven't loaded yet, wait for them and retry once.
+                    else if viewModel.availableModels.isEmpty {
+                        Task { @MainActor in
+                            // Give the model list up to 3 s to populate, then apply.
+                            for _ in 0..<30 {
+                                try? await Task.sleep(for: .milliseconds(100))
+                                if viewModel.availableModels.contains(where: { $0.id == modelId }) {
+                                    viewModel.selectedModelId = modelId
+                                    break
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // --- Auto-send (openui://new-chat?send=true) ---
+            // Fires after `pendingIncomingTextVersion` has already pre-filled the input.
+            // A short delay ensures the input text is committed before sendMessage() reads it.
+            .onChange(of: dependencies.pendingAutoSendVersion) { _, _ in
+                guard dependencies.pendingAutoSend else { return }
+                dependencies.pendingAutoSend = false
+                // Only send if there is actually something to send.
+                guard !viewModel.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                // Brief delay so the text field renders the pre-fill before sending.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    Task { await viewModel.sendMessage() }
                 }
             }
     }

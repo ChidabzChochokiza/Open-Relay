@@ -301,11 +301,57 @@ struct Open_UIApp: App {
 
         switch host {
         case "new-chat":
-            // Widget "Ask Open Relay" bar → new chat with keyboard auto-focus.
-            // Posts a notification that MainChatView/iPadMainChatView handle directly
-            // (they own the activeConversationId state, not the router).
+            // Supports query parameters from external tools (Raycast, Shortcuts, Obsidian, etc.):
+            //   openui://new-chat                           → new chat + keyboard focus
+            //   openui://new-chat?prompt=Hello              → pre-fill input with "Hello"
+            //   openui://new-chat?prompt=Hello&send=true    → pre-fill AND auto-send
+            //   openui://new-chat?model=gpt-4o              → select specific model
+            //   openui://new-chat?mode=voice-recording      → start voice recording
+            //   openui://new-chat?prompt=X&model=Y&send=true → full combo
+            let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            let queryItems = components?.queryItems ?? []
+
+            func queryValue(_ name: String) -> String? {
+                queryItems.first(where: { $0.name == name })?.value
+            }
+
+            // --- mode=voice-recording ---
+            if queryValue("mode") == "voice-recording" {
+                NotificationCenter.default.post(name: .openUIWidgetVoiceCall, object: nil)
+                ShortcutDonationService.donateVoiceCall()
+                break
+            }
+
+            // Store values immediately (no version bumps yet — they fire after the view mounts)
+            var hasPrompt = false
+            if let rawPrompt = queryValue("prompt") {
+                let prompt = String(rawPrompt.prefix(4000))
+                if !prompt.isEmpty {
+                    dependencies.pendingIncomingText = prompt
+                    hasPrompt = true
+                }
+            }
+
+            var hasModel = false
+            if let modelId = queryValue("model"), !modelId.isEmpty {
+                dependencies.pendingIncomingModelId = modelId
+                hasModel = true
+            }
+
+            let shouldSend = queryValue("send") == "true" && hasPrompt
+            if shouldSend { dependencies.pendingAutoSend = true }
+
+            // Open a new chat FIRST — this mounts the new ChatDetailView
             NotificationCenter.default.post(name: .openUINewChatWithFocus, object: nil)
             ShortcutDonationService.donateNewChat()
+
+            // Defer version bumps so the new ChatDetailView has time to mount
+            // and subscribe to .onChange before the values change
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                if hasPrompt { dependencies.pendingIncomingTextVersion += 1 }
+                if hasModel  { dependencies.pendingIncomingModelVersion += 1 }
+                if shouldSend { dependencies.pendingAutoSendVersion += 1 }
+            }
 
         case "voice-call":
             // Widget mic button → voice call. Posts a notification that

@@ -340,6 +340,25 @@ final class AppDependencyContainer: ServiceContainer {
     /// Incremented each time new URLs are queued in `pendingIncomingWebURLs`.
     var pendingIncomingWebURLsVersion: Int = 0
 
+    // MARK: - Deep-link / URL-scheme pending actions
+
+    /// A model ID passed via the `openui://new-chat?model=` URL query parameter.
+    /// Consumed once by `ChatDetailView` to override the selected model on new chats.
+    var pendingIncomingModelId: String?
+
+    /// Incremented each time a new model override arrives from the URL scheme.
+    /// `ChatDetailView` observes this via `onChange` to apply the override.
+    var pendingIncomingModelVersion: Int = 0
+
+    /// When `true`, `ChatDetailView` should automatically send the pre-filled
+    /// input text immediately after the chat opens (i.e. `send=true` was in the URL).
+    /// Consumed once and reset to `false` after the send fires.
+    var pendingAutoSend: Bool = false
+
+    /// Incremented alongside `pendingAutoSend` so the `onChange` fires even when
+    /// the flag is toggled back to `false` between two rapid deep-link invocations.
+    var pendingAutoSendVersion: Int = 0
+
     init() {
         self.serverConfigStore = ServerConfigStore()
         self.appearanceManager = AppearanceManager()

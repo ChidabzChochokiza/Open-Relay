@@ -475,6 +475,42 @@ struct FolderResponse: Codable, Sendable {
     }
 }
 
+// MARK: - Model Switch Status
+
+/// Response from an optional model-switch status endpoint
+/// (e.g. `GET http://<host>:8091/v1/switch/status`).
+///
+/// Used by the optional cold-switch progress feature (issue #79).
+/// When the user configures a `switchStatusURL` on a server, Open Relay polls
+/// this endpoint every 1 s while a chat request is pending. If `loadingModel`
+/// is non-nil the banner "Switching to <model>, ~Xs left" is shown.
+struct ModelSwitchStatus: Codable, Sendable {
+    let ok: Bool
+    let activeModel: String?
+    /// Non-nil while a model is being loaded; nil when idle.
+    let loadingModel: String?
+    let phase: String?
+    let estimateSeconds: Double?
+    let elapsedSeconds: Double?
+    let remainingSeconds: Double?
+    /// Loading progress 0.0–1.0. Nil when not switching.
+    let progress: Double?
+
+    /// Convenience: `true` iff a model switch is currently in progress.
+    var isSwitching: Bool { loadingModel != nil }
+
+    enum CodingKeys: String, CodingKey {
+        case ok
+        case activeModel      = "active_model"
+        case loadingModel     = "loading_model"
+        case phase
+        case estimateSeconds  = "estimate_seconds"
+        case elapsedSeconds   = "elapsed_seconds"
+        case remainingSeconds = "remaining_seconds"
+        case progress
+    }
+}
+
 // MARK: - Task Configuration
 
 /// Server-side task configuration from `GET /api/v1/tasks/config`.

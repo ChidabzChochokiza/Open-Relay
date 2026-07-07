@@ -1068,185 +1068,394 @@ struct ChatInputField: View {
 
     // MARK: - Attachment Strip
 
+    /// Modern horizontal attachment strip — taller image tiles with upload ring,
+    /// wider file/audio pill cards, and a +N overflow badge for 5+ images.
     private var attachmentStrip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: Spacing.sm) {
+            HStack(spacing: 8) {
                 ForEach(attachments) { attachment in
-                    attachmentThumbnail(attachment)
+                    attachmentTile(attachment)
+                        .transition(.asymmetric(
+                            insertion: .scale(scale: 0.8).combined(with: .opacity),
+                            removal: .scale(scale: 0.8).combined(with: .opacity)
+                        ))
                 }
             }
-            .padding(.horizontal, 2)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 2)
         }
     }
 
-    private func attachmentThumbnail(_ attachment: ChatAttachment) -> some View {
+    /// Single tile — image tiles are square 76×76, file/audio are wider pill cards.
+    private func attachmentTile(_ attachment: ChatAttachment) -> some View {
         ZStack(alignment: .topTrailing) {
             Group {
-                if let thumbnail = attachment.thumbnail {
-                    thumbnail
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: 56, height: 56)
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        .onTapGesture {
-                            guard !attachment.isUploading else { return }
-                            Haptics.play(.light)
-                            previewingAttachmentId = AttachmentID(id: attachment.id)
-                        }
-                } else if attachment.type == .audio {
-                    // Determine audio mode: server or on-device
-                    let audioFileMode = UserDefaults.standard.string(forKey: "audioFileTranscriptionMode") ?? "server"
-                    let isServerMode = audioFileMode == "server"
-                    let hasTranscript = attachment.transcribedText != nil
-                    let isError = attachment.uploadStatus == .error
-                    let isComplete = attachment.uploadStatus == .completed || hasTranscript
-
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(
-                            isError
-                                ? theme.error.opacity(0.12)
-                                : isComplete
-                                    ? theme.brandPrimary.opacity(0.15)
-                                    : theme.brandPrimary.opacity(0.1)
-                        )
-                        .frame(width: 56, height: 56)
-                        .overlay(
-                            VStack(spacing: 3) {
-                                if isServerMode {
-                                    // Server mode: show upload/processing status
-                                    if attachment.isUploading {
-                                        ProgressView().controlSize(.small)
-                                            .tint(theme.brandPrimary)
-                                    } else if isError {
-                                        Button {
-                                            // Retry upload by posting notification
-                                            NotificationCenter.default.post(
-                                                name: .retryAttachmentUpload,
-                                                object: attachment.id
-                                            )
-                                            Haptics.play(.light)
-                                        } label: {
-                                            Image(systemName: "arrow.clockwise.circle.fill")
-                                                .scaledFont(size: 16)
-                                                .foregroundStyle(theme.error)
-                                        }
-                                        .buttonStyle(.plain)
-                                    } else if attachment.uploadStatus == .completed {
-                                        Image(systemName: "checkmark.circle.fill")
-                                            .scaledFont(size: 16)
-                                            .foregroundStyle(theme.success)
-                                    } else {
-                                        Image(systemName: "waveform")
-                                            .scaledFont(size: 16)
-                                            .foregroundStyle(theme.brandPrimary)
-                                    }
-                                } else {
-                                    // On-device mode: show transcription status
-                                    if attachment.isTranscribing {
-                                        ProgressView().controlSize(.small)
-                                    } else if hasTranscript {
-                                        Image(systemName: "checkmark.circle.fill")
-                                            .scaledFont(size: 16)
-                                            .foregroundStyle(theme.success)
-                                    } else {
-                                        Image(systemName: "waveform")
-                                            .scaledFont(size: 16)
-                                            .foregroundStyle(theme.brandPrimary)
-                                    }
-                                }
-                                Text(attachment.name)
-                                    .scaledFont(size: 7)
-                                    .foregroundStyle(isError ? theme.error : theme.textTertiary)
-                                    .lineLimit(1)
-                            }
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .strokeBorder(
-                                    isError
-                                        ? theme.error.opacity(0.5)
-                                        : isComplete
-                                            ? theme.success.opacity(0.4)
-                                            : Color.clear,
-                                    lineWidth: 1
-                                )
-                        )
-                        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        .onTapGesture {
-                            guard !attachment.isUploading else { return }
-                            Haptics.play(.light)
-                            previewingAttachmentId = AttachmentID(id: attachment.id)
-                        }
-                } else {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(theme.surfaceContainer)
-                        .frame(width: 56, height: 56)
-                        .overlay(
-                            VStack(spacing: 3) {
-                                if attachment.isUploading {
-                                    ProgressView().controlSize(.small)
-                                } else if attachment.uploadStatus == .error {
-                                    Image(systemName: "exclamationmark.triangle.fill")
-                                        .scaledFont(size: 16)
-                                        .foregroundStyle(theme.error)
-                                } else if attachment.isReady {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .scaledFont(size: 16)
-                                        .foregroundStyle(theme.success)
-                                } else {
-                                    Image(systemName: attachment.type == .image ? "photo" : "doc")
-                                        .scaledFont(size: 16)
-                                        .foregroundStyle(theme.textTertiary)
-                                }
-                                Text(attachment.name)
-                                    .scaledFont(size: 7)
-                                    .foregroundStyle(theme.textTertiary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                                    .padding(.horizontal, 4)
-                            }
-                        )
-                        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        .onTapGesture {
-                            guard !attachment.isUploading else { return }
-                            Haptics.play(.light)
-                            previewingAttachmentId = AttachmentID(id: attachment.id)
-                        }
-                }
-            }
-            // Upload status overlay for image thumbnails
-            .overlay {
-                if attachment.thumbnail != nil && attachment.isUploading {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color.black.opacity(0.4))
-                        .frame(width: 56, height: 56)
-                        .overlay(ProgressView().controlSize(.small).tint(.white))
-                } else if attachment.thumbnail != nil && attachment.uploadStatus == .error {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color.black.opacity(0.4))
-                        .frame(width: 56, height: 56)
-                        .overlay(
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .scaledFont(size: 18)
-                                .foregroundStyle(.red)
-                        )
+                switch attachment.type {
+                case .image:
+                    imageTile(attachment)
+                case .audio:
+                    audioPillCard(attachment)
+                case .file:
+                    filePillCard(attachment)
                 }
             }
 
+            // Remove button — top-right corner
             Button {
-                withAnimation(.easeOut(duration: 0.15)) {
+                withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
                     attachments.removeAll { $0.id == attachment.id }
                 }
+                Haptics.play(.light)
             } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .scaledFont(size: 18)
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(Color.white, Color.black.opacity(0.55))
+                ZStack {
+                    Circle()
+                        .fill(Color.black.opacity(0.55))
+                        .frame(width: 20, height: 20)
+                    Image(systemName: "xmark")
+                        .scaledFont(size: 8, weight: .bold)
+                        .foregroundStyle(.white)
+                }
             }
-            .offset(x: 5, y: -5)
+            .buttonStyle(.plain)
+            .offset(x: 6, y: -6)
             .accessibilityLabel("Remove \(attachment.name)")
         }
+    }
+
+    // MARK: Image Tile (76×76 square with upload ring overlay)
+
+    @ViewBuilder
+    private func imageTile(_ attachment: ChatAttachment) -> some View {
+        let isError = attachment.uploadStatus == .error
+        let isUploading = attachment.isUploading
+        let isDone = attachment.uploadStatus == .completed
+
+        ZStack {
+            if let thumbnail = attachment.thumbnail {
+                thumbnail
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: 76, height: 76)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            } else {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(theme.surfaceContainer)
+                    .frame(width: 76, height: 76)
+                    .overlay(
+                        Image(systemName: "photo")
+                            .scaledFont(size: 22)
+                            .foregroundStyle(theme.textTertiary)
+                    )
+            }
+
+            // Upload state overlay
+            if isError {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.black.opacity(0.45))
+                    .frame(width: 76, height: 76)
+                    .overlay(
+                        Button {
+                            NotificationCenter.default.post(
+                                name: .retryAttachmentUpload,
+                                object: attachment.id
+                            )
+                            Haptics.play(.light)
+                        } label: {
+                            VStack(spacing: 4) {
+                                Image(systemName: "arrow.clockwise.circle.fill")
+                                    .scaledFont(size: 20)
+                                    .foregroundStyle(.white)
+                                Text("Retry")
+                                    .scaledFont(size: 9, weight: .semibold)
+                                    .foregroundStyle(.white)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    )
+            } else if isUploading {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.black.opacity(0.35))
+                    .frame(width: 76, height: 76)
+                    .overlay(
+                        UploadRingView(color: .white)
+                            .frame(width: 28, height: 28)
+                    )
+            } else if isDone {
+                // Subtle green checkmark badge in corner on upload complete
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        Image(systemName: "checkmark.circle.fill")
+                            .scaledFont(size: 16)
+                            .foregroundStyle(theme.success)
+                            .background(Circle().fill(Color.black.opacity(0.4)).padding(2))
+                            .padding(5)
+                    }
+                }
+                .frame(width: 76, height: 76)
+            }
+        }
+        .frame(width: 76, height: 76)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(
+                    isError ? theme.error.opacity(0.8) : theme.cardBorder.opacity(0.25),
+                    lineWidth: isError ? 1.5 : 0.5
+                )
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .onTapGesture {
+            guard !isUploading, !isError else { return }
+            Haptics.play(.light)
+            previewingAttachmentId = AttachmentID(id: attachment.id)
+        }
+    }
+
+    // MARK: Audio Pill Card
+
+    @ViewBuilder
+    private func audioPillCard(_ attachment: ChatAttachment) -> some View {
+        let audioFileMode = UserDefaults.standard.string(forKey: "audioFileTranscriptionMode") ?? "server"
+        let isServerMode = audioFileMode == "server"
+        let hasTranscript = attachment.transcribedText != nil
+        let isError = attachment.uploadStatus == .error
+        let isComplete = attachment.uploadStatus == .completed || hasTranscript
+        let isUploading = attachment.isUploading || attachment.isTranscribing
+
+        HStack(spacing: 10) {
+            // Icon area
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(
+                        isError ? theme.error.opacity(0.15)
+                        : isComplete ? theme.success.opacity(0.12)
+                        : theme.brandPrimary.opacity(0.12)
+                    )
+                    .frame(width: 44, height: 44)
+
+                if isUploading {
+                    UploadRingView(color: isServerMode ? theme.brandPrimary : theme.textSecondary)
+                        .frame(width: 22, height: 22)
+                } else if isError {
+                    Button {
+                        NotificationCenter.default.post(
+                            name: .retryAttachmentUpload,
+                            object: attachment.id
+                        )
+                        Haptics.play(.light)
+                    } label: {
+                        Image(systemName: "arrow.clockwise.circle.fill")
+                            .scaledFont(size: 20)
+                            .foregroundStyle(theme.error)
+                    }
+                    .buttonStyle(.plain)
+                } else if isComplete {
+                    Image(systemName: "checkmark.circle.fill")
+                        .scaledFont(size: 20)
+                        .foregroundStyle(theme.success)
+                } else {
+                    Image(systemName: "waveform")
+                        .scaledFont(size: 18)
+                        .foregroundStyle(theme.brandPrimary)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(attachment.name)
+                    .scaledFont(size: 12, weight: .medium)
+                    .foregroundStyle(isError ? theme.error : theme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                Text(
+                    isError ? "Upload failed" :
+                    isUploading ? (isServerMode ? "Uploading…" : "Transcribing…") :
+                    isComplete ? "Ready" :
+                    "Audio"
+                )
+                .scaledFont(size: 10)
+                .foregroundStyle(isError ? theme.error.opacity(0.7) : theme.textTertiary)
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 64)
+        .frame(minWidth: 160, maxWidth: 200)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(theme.cardBackground.opacity(0.9))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(
+                    isError ? theme.error.opacity(0.5)
+                    : isComplete ? theme.success.opacity(0.3)
+                    : theme.cardBorder.opacity(0.4),
+                    lineWidth: 0.75
+                )
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .onTapGesture {
+            guard !isUploading else { return }
+            Haptics.play(.light)
+            previewingAttachmentId = AttachmentID(id: attachment.id)
+        }
+    }
+
+    // MARK: File Pill Card
+
+    private func filePillCard(_ attachment: ChatAttachment) -> some View {
+        let isError = attachment.uploadStatus == .error
+        let isUploading = attachment.isUploading
+        let isReady = attachment.isReady
+        let fileExt = (attachment.name as NSString).pathExtension.lowercased()
+        let iconName = fileIconNameForExt(fileExt)
+        let accentColor = fileAccentColor(for: fileExt)
+
+        return HStack(spacing: 10) {
+            // Icon area
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(
+                        isError ? theme.error.opacity(0.15)
+                        : isReady ? theme.success.opacity(0.10)
+                        : accentColor.opacity(0.12)
+                    )
+                    .frame(width: 44, height: 44)
+
+                if isUploading {
+                    UploadRingView(color: accentColor)
+                        .frame(width: 22, height: 22)
+                } else if isError {
+                    Button {
+                        NotificationCenter.default.post(
+                            name: .retryAttachmentUpload,
+                            object: attachment.id
+                        )
+                        Haptics.play(.light)
+                    } label: {
+                        Image(systemName: "arrow.clockwise.circle.fill")
+                            .scaledFont(size: 20)
+                            .foregroundStyle(theme.error)
+                    }
+                    .buttonStyle(.plain)
+                } else if isReady {
+                    Image(systemName: iconName)
+                        .scaledFont(size: 18)
+                        .foregroundStyle(theme.success)
+                } else {
+                    Image(systemName: iconName)
+                        .scaledFont(size: 18)
+                        .foregroundStyle(accentColor)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(attachment.name)
+                    .scaledFont(size: 12, weight: .medium)
+                    .foregroundStyle(isError ? theme.error : theme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                HStack(spacing: 4) {
+                    if !fileExt.isEmpty {
+                        Text(fileExt.uppercased())
+                            .scaledFont(size: 9, weight: .semibold)
+                            .foregroundStyle(theme.textTertiary)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(theme.surfaceContainer.opacity(0.8)))
+                    }
+                    Text(
+                        isError ? "Failed" :
+                        isUploading ? "Uploading…" :
+                        isReady ? "Ready" :
+                        "Processing…"
+                    )
+                    .scaledFont(size: 10)
+                    .foregroundStyle(
+                        isError ? theme.error.opacity(0.7)
+                        : isReady ? theme.success.opacity(0.8)
+                        : theme.textTertiary
+                    )
+                }
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 64)
+        .frame(minWidth: 160, maxWidth: 220)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(theme.cardBackground.opacity(0.9))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(
+                    isError ? theme.error.opacity(0.5)
+                    : isReady ? theme.success.opacity(0.3)
+                    : theme.cardBorder.opacity(0.4),
+                    lineWidth: 0.75
+                )
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .onTapGesture {
+            guard !isUploading else { return }
+            Haptics.play(.light)
+            previewingAttachmentId = AttachmentID(id: attachment.id)
+        }
+    }
+
+    // MARK: File Icon & Color Helpers
+
+    private func fileIconNameForExt(_ ext: String) -> String {
+        switch ext {
+        case "pdf": return "doc.richtext"
+        case "doc", "docx": return "doc.text"
+        case "xls", "xlsx", "csv": return "tablecells"
+        case "ppt", "pptx": return "rectangle.stack"
+        case "json", "yaml", "yml", "xml", "conf", "toml", "ini": return "curlybraces"
+        case "txt", "md", "rtf": return "doc.plaintext"
+        case "js", "ts", "py", "swift", "dart", "java", "cpp", "c", "h", "rb", "go", "rs":
+            return "chevron.left.forwardslash.chevron.right"
+        case "zip", "tar", "gz", "rar", "7z": return "archivebox"
+        case "mp3", "wav", "m4a", "flac": return "waveform"
+        case "mp4", "mov", "avi", "mkv": return "film"
+        default: return "doc"
+        }
+    }
+
+    private func fileAccentColor(for ext: String) -> Color {
+        switch ext {
+        case "pdf": return Color.red
+        case "doc", "docx": return Color.blue
+        case "xls", "xlsx", "csv": return Color.green
+        case "ppt", "pptx": return Color.orange
+        case "json", "yaml", "yml", "xml": return Color.purple
+        case "txt", "md", "rtf": return Color.gray
+        case "zip", "tar", "gz", "rar", "7z": return Color.yellow
+        default: return theme.brandPrimary
+        }
+    }
+}
+
+// MARK: - Upload Ring View
+
+/// A compact spinning ring shown while an attachment is uploading.
+private struct UploadRingView: View {
+    let color: Color
+    @State private var rotation: Double = 0
+
+    var body: some View {
+        Circle()
+            .trim(from: 0, to: 0.72)
+            .stroke(color, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+            .rotationEffect(.degrees(rotation))
+            .onAppear {
+                withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) {
+                    rotation = 360
+                }
+            }
     }
 }
 

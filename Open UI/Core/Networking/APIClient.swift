@@ -711,17 +711,22 @@ final class APIClient: @unchecked Sendable {
     func getConversation(id: String) async throws -> Conversation {
         let (data, _) = try await network.requestRaw(path: "/api/v1/chats/\(id)")
 
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw APIError.responseDecoding(
-                underlying: NSError(
-                    domain: "APIError", code: -1,
-                    userInfo: [NSLocalizedDescriptionKey: "Expected chat object"]
-                ),
-                data: data
-            )
-        }
-
-        return parseFullConversation(json)
+        // Parse the full conversation (MessageHistory.fromServerJSON + InlineImageStore.extractAndReplace
+        // per node) on a background thread so we never block the main actor — even when called from a
+        // @MainActor context like ChatViewModel.loadConversation(). Large chats with hundreds of messages
+        // and base64 image nodes were causing the app to freeze on launch when auto-restoring a chat.
+        return try await Task.detached(priority: .userInitiated) { [self] in
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw APIError.responseDecoding(
+                    underlying: NSError(
+                        domain: "APIError", code: -1,
+                        userInfo: [NSLocalizedDescriptionKey: "Expected chat object"]
+                    ),
+                    data: data
+                )
+            }
+            return self.parseFullConversation(json)
+        }.value
     }
 
     /// Creates a new permanent chat on the server using the full history payload.
@@ -5975,6 +5980,27 @@ final class APIClient: @unchecked Sendable {
     func getGroups() async throws -> [GroupResponse] {
         let (data, _) = try await network.requestRaw(path: "/api/v1/groups/")
         return try JSONDecoder().decode([GroupResponse].self, from: data)
+    }
+
+    // MARK: - Model-Switch Status (issue #79)
+
+    /// Fetches the model-switch status from an absolute URL configured per-server.
+    /// The URL is NOT relative to the OpenWebUI base URL — it points directly at the
+    /// SGLang proxy or similar service (e.g. `http://192.168.1.10:8091/v1/switch/status`).
+    /// Returns `nil` on any network or decoding error so the caller can treat it as
+    /// "no switch in progress" gracefully.
+    func fetchModelSwitchStatus(url: String) async -> ModelSwitchStatus? {
+        guard let endpoint = URL(string: url) else { return nil }
+        var request = URLRequest(url: endpoint)
+        request.timeoutInterval = 5
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+            let decoder = JSONDecoder()
+            return try decoder.decode(ModelSwitchStatus.self, from: data)
+        } catch {
+            return nil
+        }
     }
 }
 

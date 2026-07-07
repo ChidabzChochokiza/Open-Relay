@@ -7,6 +7,7 @@ struct ServerManagementView: View {
     @State private var editingURL: String = ""
     @State private var editingName: String = ""
     @State private var editingSelfSigned: Bool = false
+    @State private var editingSwitchStatusURL: String = ""
     @State private var editingHeaderEntries: [CustomHeaderEntry] = []
     @State private var isEditing: Bool = false
     @State private var showDeleteConfirmation = false
@@ -465,6 +466,7 @@ struct ServerManagementView: View {
             .filter { !systemKeys.contains($0.key) }
             .map { CustomHeaderEntry(id: UUID().uuidString, key: $0.key, value: $0.value) }
             .sorted { $0.key < $1.key }
+        editingSwitchStatusURL = activeServer?.switchStatusURL ?? ""
         isEditing = true
     }
 
@@ -494,6 +496,19 @@ struct ServerManagementView: View {
                     Text("Custom Headers")
                 } footer: {
                     Text("HTTP headers sent with every request to this server. Useful for reverse proxies or services that require extra authentication headers.")
+                        .font(.caption)
+                }
+
+                Section {
+                    TextField("https://localhost:8080/status", text: $editingSwitchStatusURL)
+                        .textContentType(.URL)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .keyboardType(.URL)
+                } header: {
+                    Text("Model Switch Status URL")
+                } footer: {
+                    Text("Optional. If set, Open UI will poll this URL while a request is pending and show a banner like \"Loading qwen3-35b ~42s left\". Leave blank to disable. Useful for SGLang or similar proxies that hot-swap models.")
                         .font(.caption)
                 }
             }
@@ -530,6 +545,9 @@ struct ServerManagementView: View {
             updatedHeaders[trimmedKey] = entry.value
         }
         config.customHeaders = updatedHeaders
+
+        let trimmedSwitchURL = editingSwitchStatusURL.trimmingCharacters(in: .whitespaces)
+        config.switchStatusURL = trimmedSwitchURL.isEmpty ? nil : trimmedSwitchURL
 
         dependencies.serverConfigStore.updateServer(config)
         dependencies.refreshServices()
