@@ -521,7 +521,13 @@ struct MessageHistory: Sendable {
         // Reconstruct the full content string (with inline <details> blocks for
         // tool calls and reasoning) so the existing ToolCallParser renders everything
         // correctly: text, tool call cards, and reasoning blocks — all in order.
-        if content.isEmpty, let outputArr = msg["output"] as? [[String: Any]] {
+        //
+        // Always prefer the output array when present — even when `content` is non-empty.
+        // OpenWebUI 0.10+ stores only a compact tool-result summary blob in `content`
+        // (e.g. "📊 Presentazione pronta · 14 slide") while the full rich response
+        // (prose + tool call blocks + final answer) lives in the `output` array.
+        // Using `content` directly would show the stub instead of the real reply.
+        if let outputArr = msg["output"] as? [[String: Any]], !outputArr.isEmpty {
             if let reconstructed = reconstructContentFromOutput(outputArr) {
                 content = reconstructed
             }

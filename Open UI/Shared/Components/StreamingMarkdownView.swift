@@ -1521,7 +1521,7 @@ struct MarkdownWithLoading: View {
         let text = content ?? ""
         if isLoading && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             HStack {
-                TypingIndicator()
+                BlinkingCursorIndicator()
                 Spacer()
             }
         } else {

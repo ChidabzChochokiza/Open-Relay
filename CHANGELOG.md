@@ -1,5 +1,14 @@
 # Changelog
 
+## v4.13.1 — July 7, 2026
+
+### Improvements
+- Replaced the bouncing typing dots with a clean blinking cursor while waiting for the AI response to start.
+
+### Bug Fixes
+- Fixed model response getting stuck inside the tool call dropdown during streaming
+- Fixed server-generated files showing as non-tappable links
+
 ## v4.13 — July 4, 2026
 
 ### What's New

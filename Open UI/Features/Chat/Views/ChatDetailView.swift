@@ -449,7 +449,8 @@ struct ChatDetailView: View {
         // Extracted into a private extension to keep the type-checker expression size manageable.
         .applyLinkAndPromptHandlers(
             viewModel: viewModel,
-            downloadAndShare: { fileId in Task { await downloadAndShareFile(fileId: fileId) } }
+            downloadAndShare: { fileId in Task { await downloadAndShareFile(fileId: fileId) } },
+            downloadAndShareURL: { url in Task { await downloadAndShareArbitraryURL(url) } }
         )
         // Handle "Ask" / "Explain" taps from the text selection menu in assistant
         // messages. Extracted into a private extension to keep the type-checker
@@ -4056,6 +4057,46 @@ for item in items {
         }
     }
 
+    /// Downloads any server-hosted file via an authenticated raw GET request,
+    /// saves it to a temp directory, and presents the iOS share sheet.
+    /// Used for non-/api/v1/files/ server URLs (e.g. /cache/files/…, /uploads/…).
+    private func downloadAndShareArbitraryURL(_ url: URL) async {
+        guard let apiClient = dependencies.apiClient else {
+            downloadErrorMessage = "Not connected to server."
+            showDownloadError = true
+            return
+        }
+        withAnimation { isDownloadingFile = true }
+        do {
+            let (data, response) = try await apiClient.network.requestRawAbsoluteURL(url)
+            var fileName = url.lastPathComponent.isEmpty ? "download" : url.lastPathComponent
+            let contentType = response.value(forHTTPHeaderField: "Content-Type") ?? ""
+            if (fileName as NSString).pathExtension.isEmpty {
+                let ext: String
+                switch contentType {
+                case let ct where ct.contains("pdf"): ext = "pdf"
+                case let ct where ct.contains("pptx") || ct.contains("presentation"): ext = "pptx"
+                case let ct where ct.contains("docx") || ct.contains("word"): ext = "docx"
+                case let ct where ct.contains("xlsx") || ct.contains("spreadsheet"): ext = "xlsx"
+                case let ct where ct.contains("plain"): ext = "txt"
+                case let ct where ct.contains("json"): ext = "json"
+                case let ct where ct.contains("png"): ext = "png"
+                case let ct where ct.contains("jpeg") || ct.contains("jpg"): ext = "jpg"
+                default: ext = "bin"
+                }
+                fileName = "\(fileName).\(ext)"
+            }
+            let tempFile = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+            try data.write(to: tempFile)
+            withAnimation { isDownloadingFile = false }
+            downloadedFileURL = tempFile
+        } catch {
+            withAnimation { isDownloadingFile = false }
+            downloadErrorMessage = "Failed to download: \(error.localizedDescription)"
+            showDownloadError = true
+        }
+    }
+
     // MARK: - #URL Suggestion Pill
 
     /// Floating pill shown when the user types `#https://...` in the input field.
@@ -4233,12 +4274,12 @@ private struct IsolatedAssistantMessage: View {
         if effectiveIsStreaming && rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             // Wrap in HStack+Spacer to pin the indicator to the leading edge.
             // Without this, the infinity-width assistant content frame can
-            // misplace or stretch the 44×22pt fixed view.
+            // misplace or stretch the fixed view.
             // minHeight: 44 ensures the new message row has enough natural height
             // from the first frame so the minHeight-VStack scroll anchor doesn't
-            // position the TypingIndicator above/overlapping the row header.
+            // position the indicator above/overlapping the row header.
             HStack(spacing: 0) {
-                TypingIndicator()
+                BlinkingCursorIndicator()
                 Spacer()
             }
             .frame(minHeight: 44)
@@ -4462,7 +4503,9 @@ private struct IsolatedAssistantMessage: View {
     static func resolveRelativeURLs(_ content: String, baseURL: String) -> String {
         let base = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard !base.isEmpty else { return content }
-        let pattern = #"(\]\()(/api/[^\s\)]+)"#
+        // Match any markdown link target that starts with a single "/" (server-relative path)
+        // but NOT "//" (protocol-relative) and NOT already-absolute URLs (containing "://").
+        let pattern = #"(\]\()(\/(?!\/)[^\s\)]*)"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return content }
         let nsContent = content as NSString
         let matches = regex.matches(in: content, range: NSRange(location: 0, length: nsContent.length))
@@ -4478,6 +4521,12 @@ private struct IsolatedAssistantMessage: View {
             let prefix = nsContent.substring(with: prefixRange)
             let pathRange = match.range(at: 2)
             let relativePath = nsContent.substring(with: pathRange)
+            // Skip if the path already contains "://" (already absolute, shouldn't happen but be safe)
+            guard !relativePath.contains("://") else {
+                result += "\(prefix)\(relativePath)"
+                currentIndex = fullRange.location + fullRange.length
+                continue
+            }
             result += "\(prefix)\(base)\(relativePath)"
             currentIndex = fullRange.location + fullRange.length
         }
@@ -5046,7 +5095,8 @@ private extension View {
 private extension View {
     func applyLinkAndPromptHandlers(
         viewModel: ChatViewModel,
-        downloadAndShare: @escaping (String) -> Void
+        downloadAndShare: @escaping (String) -> Void,
+        downloadAndShareURL: @escaping (URL) -> Void
     ) -> some View {
         self
             // Intercept link taps from MarkdownView: download server file URLs
@@ -5055,17 +5105,28 @@ private extension View {
                 guard let url = notification.userInfo?["url"] as? URL else { return }
                 let urlString = url.absoluteString
                 let base = viewModel.serverBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                if !base.isEmpty, urlString.hasPrefix(base), urlString.contains("/api/v1/files/"),
-                   urlString.hasSuffix("/content") {
-                    let parts = urlString.split(separator: "/")
-                    if let filesIdx = parts.firstIndex(of: "files"),
-                       filesIdx + 1 < parts.count {
-                        let fileId = String(parts[filesIdx + 1])
-                        downloadAndShare(fileId)
-                        return
+
+                // Check if this URL belongs to the server
+                let isServerURL = !base.isEmpty && urlString.hasPrefix(base)
+
+                if isServerURL {
+                    // Known files API pattern: use existing fileId-based download
+                    if urlString.contains("/api/v1/files/"), urlString.hasSuffix("/content") {
+                        let parts = urlString.split(separator: "/")
+                        if let filesIdx = parts.firstIndex(of: "files"),
+                           filesIdx + 1 < parts.count {
+                            let fileId = String(parts[filesIdx + 1])
+                            downloadAndShare(fileId)
+                            return
+                        }
                     }
+                    // All other server-hosted URLs (e.g. /cache/files/…, /uploads/…):
+                    // download via authenticated raw GET so the user gets the file
+                    // with credentials injected, not a Safari 401.
+                    downloadAndShareURL(url)
+                } else {
+                    UIApplication.shared.open(url)
                 }
-                UIApplication.shared.open(url)
             }
             // Handle sendPrompt bridge calls from InlineVisualizerView.
             .onReceive(NotificationCenter.default.publisher(for: .vizSendPrompt)) { notification in

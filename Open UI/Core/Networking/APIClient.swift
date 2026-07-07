@@ -1332,8 +1332,6 @@ final class APIClient: @unchecked Sendable {
         )
     }
 
-    // MARK: - Folder Sharing (v0.7+)
-
     /// GET /api/v1/folders/shared
     /// Returns all folders shared *with* the current user (not owned by them).
     func getSharedFolders() async throws -> [[String: Any]] {

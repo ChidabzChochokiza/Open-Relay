@@ -2723,7 +2723,7 @@ struct AssistantMessageContent: View {
                 // Without this, the infinity-width VStack container can misplace
                 // or stretch the 44×22pt fixed view.
                 HStack(spacing: 0) {
-                    TypingIndicator()
+                    BlinkingCursorIndicator()
                     Spacer()
                 }
             } else {
@@ -2823,7 +2823,7 @@ struct AssistantMessageContent: View {
                         // Without this, the infinity-width VStack container can misplace
                         // or stretch the 44×22pt fixed view.
                         HStack(spacing: 0) {
-                            TypingIndicator()
+                            BlinkingCursorIndicator()
                             Spacer()
                         }
                     }

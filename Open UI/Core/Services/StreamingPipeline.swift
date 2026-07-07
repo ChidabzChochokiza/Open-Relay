@@ -513,42 +513,123 @@ actor StreamingPipeline {
             return flags
         }
 
-        var toolCallOpenCount = 0
-        var totalCloseCount = 0
-        var reasoningOpenCount = 0
+        // Depth-aware scan: walk the content tracking nesting so that nested
+        // <details> elements inside tool result HTML (e.g. from web search results)
+        // don't corrupt the open/close accounting.
+        //
+        // For each <details type="tool_calls"> opener we track a depth counter.
+        // Only a </details> that brings depth back to 0 truly closes the block.
+        // Plain <details> (non-tool_calls, non-reasoning) inside the body bump
+        // depth and their corresponding </details> only decrements it — they do
+        // NOT count as closing the outer tool_calls block.
+        var hasUnclosed = false
+        var hasClosed = false
 
         var idx = content.startIndex
         while idx < content.endIndex {
-            if content[idx] == "<" {
-                let detailsTag = "<details"
-                if content[idx...].hasPrefix(detailsTag) {
-                    let afterDetails = content.index(idx, offsetBy: detailsTag.count, limitedBy: content.endIndex) ?? content.endIndex
-                    var tagEnd = afterDetails
-                    while tagEnd < content.endIndex && content[tagEnd] != ">" {
-                        tagEnd = content.index(after: tagEnd)
+            guard content[idx] == "<" else {
+                idx = content.index(after: idx)
+                continue
+            }
+
+            let detailsOpenTag = "<details"
+            if content[idx...].hasPrefix(detailsOpenTag) {
+                // Scan the opening tag with quote-awareness so we correctly
+                // find the attribute type even when values contain ">".
+                let afterDetails = content.index(idx, offsetBy: detailsOpenTag.count,
+                                                 limitedBy: content.endIndex) ?? content.endIndex
+                var j = afterDetails
+                var inQuote: Character? = nil
+                var openingTagEnd: String.Index? = nil
+                while j < content.endIndex {
+                    let ch = content[j]
+                    if let q = inQuote {
+                        if ch == q { inQuote = nil }
+                    } else {
+                        if ch == "\"" || ch == "'" { inQuote = ch }
+                        else if ch == ">" { openingTagEnd = content.index(after: j); break }
                     }
-                    let tagContent = String(content[idx..<tagEnd]).lowercased()
-                    if tagContent.contains("tool_calls") {
-                        toolCallOpenCount += 1
-                    } else if tagContent.contains("type=\"reasoning\"") || tagContent.contains("type='reasoning'") {
-                        reasoningOpenCount += 1
-                    }
-                    idx = tagEnd < content.endIndex ? content.index(after: tagEnd) : content.endIndex
-                    continue
+                    j = content.index(after: j)
                 }
-                let closeTag = "</details>"
-                if content[idx...].hasPrefix(closeTag) {
-                    totalCloseCount += 1
-                    idx = content.index(idx, offsetBy: closeTag.count, limitedBy: content.endIndex) ?? content.endIndex
+
+                guard let tagBodyStart = openingTagEnd else {
+                    // Opening tag not yet closed — block is still in-flight.
+                    hasUnclosed = true
+                    break
+                }
+
+                let tagText = String(content[idx..<tagBodyStart]).lowercased()
+                let isToolCallsBlock = tagText.contains("type=\"tool_calls\"")
+                                    || tagText.contains("type='tool_calls'")
+
+                if isToolCallsBlock {
+                    // Depth-track to find the matching </details> for this block.
+                    var k = tagBodyStart
+                    var depth = 1
+
+                    while k < content.endIndex && depth > 0 {
+                        guard let nextLt = content[k...].firstIndex(of: "<") else {
+                            depth = -1; break   // closing tag not yet arrived
+                        }
+                        let peekEnd = content.index(nextLt, offsetBy: 9,
+                                                    limitedBy: content.endIndex) ?? content.endIndex
+                        let peek = content[nextLt..<peekEnd].lowercased()
+
+                        if peek.hasPrefix("</details") {
+                            var m = content.index(nextLt, offsetBy: 9,
+                                                  limitedBy: content.endIndex) ?? content.endIndex
+                            while m < content.endIndex && content[m] != ">" {
+                                m = content.index(after: m)
+                            }
+                            if m < content.endIndex {
+                                depth -= 1
+                                k = content.index(after: m)
+                            } else {
+                                depth = -1; break
+                            }
+                        } else if peek.hasPrefix("<details") {
+                            // Nested <details> — skip its opening tag and bump depth.
+                            let nestedNameEnd = content.index(nextLt, offsetBy: 8,
+                                                              limitedBy: content.endIndex) ?? content.endIndex
+                            var m = nestedNameEnd
+                            var nestedInQuote: Character? = nil
+                            var foundClose = false
+                            while m < content.endIndex {
+                                let ch = content[m]
+                                if let q = nestedInQuote {
+                                    if ch == q { nestedInQuote = nil }
+                                } else {
+                                    if ch == "\"" || ch == "'" { nestedInQuote = ch }
+                                    else if ch == ">" { foundClose = true; m = content.index(after: m); break }
+                                }
+                                m = content.index(after: m)
+                            }
+                            if foundClose { depth += 1; k = m }
+                            else { depth = -1; break }
+                        } else {
+                            k = content.index(after: nextLt)
+                        }
+                    }
+
+                    if depth == 0 {
+                        hasClosed = true
+                    } else {
+                        // depth < 0 means the closing tag hasn't arrived yet.
+                        hasUnclosed = true
+                    }
+
+                    idx = k   // resume scan after this block
+                    continue
+                } else {
+                    idx = tagBodyStart
                     continue
                 }
             }
+
+            // Not a <details opener — advance past this '<'
             idx = content.index(after: idx)
         }
 
-        let toolCallCloseCount = max(0, totalCloseCount - reasoningOpenCount)
-        let hasUnclosed = toolCallOpenCount > toolCallCloseCount
-        let hasClosed = toolCallOpenCount > 0 && !hasUnclosed
         let flags = ToolCallBlockFlags(hasUnclosed: hasUnclosed, hasClosed: hasClosed)
         _toolCallFlagsCache = (count, flags)
         return flags
@@ -622,28 +703,99 @@ actor StreamingPipeline {
     }
 
     private static func lastToolCallDetailsEnd(in content: String) -> Int? {
-        let closeTag = "</details>"
-        guard content.contains("tool_calls"), content.contains(closeTag) else { return nil }
-        var closeEnds: [String.Index] = []
-        var sr = content.startIndex..<content.endIndex
-        while let r = content.range(of: closeTag, options: .caseInsensitive, range: sr) {
-            closeEnds.append(r.upperBound); sr = r.upperBound..<content.endIndex
-        }
-        var openStarts: [String.Index] = []
-        sr = content.startIndex..<content.endIndex
-        while let r = content.range(of: "<details", options: .caseInsensitive, range: sr) {
-            openStarts.append(r.lowerBound); sr = r.upperBound..<content.endIndex
-        }
-        guard !closeEnds.isEmpty && !openStarts.isEmpty else { return nil }
-        var lastToolCallEnd: String.Index? = nil
-        let pairCount = min(closeEnds.count, openStarts.count)
-        for i in 0..<pairCount {
-            if let tagEnd = content.range(of: ">", range: openStarts[i]..<content.endIndex) {
-                let tagText = String(content[openStarts[i]..<tagEnd.upperBound]).lowercased()
-                if tagText.contains("tool_calls") { lastToolCallEnd = closeEnds[i] }
+        guard content.contains("tool_calls") else { return nil }
+
+        // Depth-aware scan: find the end of each top-level <details type="tool_calls">
+        // block by tracking nesting so that nested <details> inside tool result HTML
+        // (e.g. from web search result snippets) don't cause early termination.
+        var lastEnd: String.Index? = nil
+        var idx = content.startIndex
+
+        while idx < content.endIndex {
+            guard content[idx] == "<" else { idx = content.index(after: idx); continue }
+
+            let detailsOpenTag = "<details"
+            guard content[idx...].hasPrefix(detailsOpenTag) else {
+                idx = content.index(after: idx); continue
             }
+
+            // Scan the opening tag quote-aware to read the full attribute string.
+            let afterDetails = content.index(idx, offsetBy: detailsOpenTag.count,
+                                             limitedBy: content.endIndex) ?? content.endIndex
+            var j = afterDetails
+            var inQuote: Character? = nil
+            var openingTagEnd: String.Index? = nil
+            while j < content.endIndex {
+                let ch = content[j]
+                if let q = inQuote {
+                    if ch == q { inQuote = nil }
+                } else {
+                    if ch == "\"" || ch == "'" { inQuote = ch }
+                    else if ch == ">" { openingTagEnd = content.index(after: j); break }
+                }
+                j = content.index(after: j)
+            }
+
+            guard let tagBodyStart = openingTagEnd else { break }   // mid-stream
+
+            let tagText = String(content[idx..<tagBodyStart]).lowercased()
+            let isToolCallsBlock = tagText.contains("type=\"tool_calls\"")
+                                || tagText.contains("type='tool_calls'")
+
+            guard isToolCallsBlock else { idx = tagBodyStart; continue }
+
+            // Depth-track to find the matching </details> for this tool_calls block.
+            var k = tagBodyStart
+            var depth = 1
+
+            while k < content.endIndex && depth > 0 {
+                guard let nextLt = content[k...].firstIndex(of: "<") else {
+                    depth = -1; break
+                }
+                let peekEnd = content.index(nextLt, offsetBy: 9,
+                                            limitedBy: content.endIndex) ?? content.endIndex
+                let peek = content[nextLt..<peekEnd].lowercased()
+
+                if peek.hasPrefix("</details") {
+                    var m = content.index(nextLt, offsetBy: 9,
+                                          limitedBy: content.endIndex) ?? content.endIndex
+                    while m < content.endIndex && content[m] != ">" {
+                        m = content.index(after: m)
+                    }
+                    if m < content.endIndex {
+                        depth -= 1
+                        k = content.index(after: m)
+                        if depth == 0 { lastEnd = k }
+                    } else {
+                        depth = -1; break
+                    }
+                } else if peek.hasPrefix("<details") {
+                    let nestedNameEnd = content.index(nextLt, offsetBy: 8,
+                                                      limitedBy: content.endIndex) ?? content.endIndex
+                    var m = nestedNameEnd
+                    var nestedInQuote: Character? = nil
+                    var foundClose = false
+                    while m < content.endIndex {
+                        let ch = content[m]
+                        if let q = nestedInQuote {
+                            if ch == q { nestedInQuote = nil }
+                        } else {
+                            if ch == "\"" || ch == "'" { nestedInQuote = ch }
+                            else if ch == ">" { foundClose = true; m = content.index(after: m); break }
+                        }
+                        m = content.index(after: m)
+                    }
+                    if foundClose { depth += 1; k = m }
+                    else { depth = -1; break }
+                } else {
+                    k = content.index(after: nextLt)
+                }
+            }
+
+            idx = (depth == 0) ? k : content.endIndex
         }
-        guard let e = lastToolCallEnd else { return nil }
+
+        guard let e = lastEnd else { return nil }
         return content.distance(from: content.startIndex, to: e)
     }
 

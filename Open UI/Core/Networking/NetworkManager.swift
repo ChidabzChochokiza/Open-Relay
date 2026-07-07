@@ -228,6 +228,34 @@ final class NetworkManager: NSObject, Sendable {
         return (data, response as! HTTPURLResponse)
     }
 
+    /// Downloads any absolute URL belonging to this server using the stored auth token.
+    ///
+    /// Used for server-generated file links that don't follow the `/api/v1/files/{id}/content`
+    /// pattern — e.g. `/cache/files/...`, `/uploads/...`, `/static/...`.
+    /// The auth token is injected so protected endpoints respond correctly.
+    func requestRawAbsoluteURL(
+        _ url: URL,
+        method: HTTPMethod = .get,
+        timeout: TimeInterval? = nil
+    ) async throws -> (Data, HTTPURLResponse) {
+        var request = URLRequest(url: url)
+        request.httpMethod = method.rawValue
+        if let timeout { request.timeoutInterval = timeout }
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if let token = authToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        for (key, value) in serverConfig.customHeaders {
+            let lower = key.lowercased()
+            if lower != "authorization" && lower != "content-type" && lower != "accept" {
+                request.setValue(value, forHTTPHeaderField: key)
+            }
+        }
+        let (data, response) = try await performRequest(request)
+        try validateHTTPResponse(response, data: data)
+        return (data, response as! HTTPURLResponse)
+    }
+
     func requestVoid(
         path: String,
         method: HTTPMethod = .get,
