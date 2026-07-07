@@ -29,6 +29,8 @@
 		38AA00012FA9B00000MRMAID /* BeautifulMermaid in Frameworks */ = {isa = PBXBuildFile; productRef = 38AA00002FA9B00000MRMAID /* BeautifulMermaid */; };
 		38AD615B2FAB1946007725CE /* MarkdownParser in Frameworks */ = {isa = PBXBuildFile; productRef = 38AD615A2FAB1946007725CE /* MarkdownParser */; };
 		38AD615D2FAB1946007725CE /* MarkdownView in Frameworks */ = {isa = PBXBuildFile; productRef = 38AD615C2FAB1946007725CE /* MarkdownView */; };
+		38B6BD5F2FFD7ACE00BDD85B /* MarkdownParser in Frameworks */ = {isa = PBXBuildFile; productRef = 38B6BD5E2FFD7ACE00BDD85B /* MarkdownParser */; };
+		38B6BD612FFD7ACE00BDD85B /* MarkdownView in Frameworks */ = {isa = PBXBuildFile; productRef = 38B6BD602FFD7ACE00BDD85B /* MarkdownView */; };
 		38B6DED52FA55DDC001924FB /* MarkdownParser in Frameworks */ = {isa = PBXBuildFile; productRef = 38B6DED42FA55DDC001924FB /* MarkdownParser */; };
 		38B6DED72FA55DDC001924FB /* MarkdownView in Frameworks */ = {isa = PBXBuildFile; productRef = 38B6DED62FA55DDC001924FB /* MarkdownView */; };
 		38C7FDAB2FF9783D001C94A0 /* MarkdownParser in Frameworks */ = {isa = PBXBuildFile; productRef = 38C7FDAA2FF9783D001C94A0 /* MarkdownParser */; };
@@ -159,8 +161,10 @@
 				387CAAD62F8AB953000B5152 /* MarkdownParser in Frameworks */,
 				38AD615D2FAB1946007725CE /* MarkdownView in Frameworks */,
 				3879DA8E2FE7D4BC0064E527 /* MarkdownView in Frameworks */,
+				38B6BD5F2FFD7ACE00BDD85B /* MarkdownParser in Frameworks */,
 				3879DA8C2FE7D4BC0064E527 /* MarkdownParser in Frameworks */,
 				38C7FDAB2FF9783D001C94A0 /* MarkdownParser in Frameworks */,
+				38B6BD612FFD7ACE00BDD85B /* MarkdownView in Frameworks */,
 				3890E2912F9845C10011D505 /* MarkdownView in Frameworks */,
 				38AA00012FA9B00000MRMAID /* BeautifulMermaid in Frameworks */,
 				3800ST012F00000000ST001 /* SwiftTerm in Frameworks */,
@@ -284,6 +288,8 @@
 				3879DA922FE7D4ED0064E527 /* MarkdownView */,
 				38C7FDAA2FF9783D001C94A0 /* MarkdownParser */,
 				38C7FDAC2FF9783D001C94A0 /* MarkdownView */,
+				38B6BD5E2FFD7ACE00BDD85B /* MarkdownParser */,
+				38B6BD602FFD7ACE00BDD85B /* MarkdownView */,
 			);
 			productName = "Open UI";
 			productReference = 38EB667D2F39CE5A00AED774 /* Open UI.app */;
@@ -350,7 +356,7 @@
 				38754A952F845BE60012CD28 /* XCRemoteSwiftPackageReference "ReactionContextMenu" */,
 				3800STREF2F00000000ST00F /* XCRemoteSwiftPackageReference "SwiftTerm" */,
 				38FEA3162FA2A18600A98F25 /* XCRemoteSwiftPackageReference "mlx-audio-swift" */,
-				38C7FDA92FF9783D001C94A0 /* XCLocalSwiftPackageReference "../MarkdownView" */,
+				38B6BD5D2FFD7ACE00BDD85B /* XCRemoteSwiftPackageReference "MarkdownView" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 38EB667E2F39CE5A00AED774 /* Products */;
@@ -806,13 +812,6 @@
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCLocalSwiftPackageReference section */
-		38C7FDA92FF9783D001C94A0 /* XCLocalSwiftPackageReference "../MarkdownView" */ = {
-			isa = XCLocalSwiftPackageReference;
-			relativePath = ../MarkdownView;
-		};
-/* End XCLocalSwiftPackageReference section */
-
 /* Begin XCRemoteSwiftPackageReference section */
 		3800STREF2F00000000ST00F /* XCRemoteSwiftPackageReference "SwiftTerm" */ = {
 			isa = XCRemoteSwiftPackageReference;
@@ -836,6 +835,14 @@
 			requirement = {
 				kind = upToNextMajorVersion;
 				minimumVersion = 0.1.0;
+			};
+		};
+		38B6BD5D2FFD7ACE00BDD85B /* XCRemoteSwiftPackageReference "MarkdownView" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/Ichigo3766/MarkdownView.git";
+			requirement = {
+				branch = main;
+				kind = branch;
 			};
 		};
 		38FEA3162FA2A18600A98F25 /* XCRemoteSwiftPackageReference "mlx-audio-swift" */ = {
@@ -926,6 +933,16 @@
 		};
 		38AD615C2FAB1946007725CE /* MarkdownView */ = {
 			isa = XCSwiftPackageProductDependency;
+			productName = MarkdownView;
+		};
+		38B6BD5E2FFD7ACE00BDD85B /* MarkdownParser */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 38B6BD5D2FFD7ACE00BDD85B /* XCRemoteSwiftPackageReference "MarkdownView" */;
+			productName = MarkdownParser;
+		};
+		38B6BD602FFD7ACE00BDD85B /* MarkdownView */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 38B6BD5D2FFD7ACE00BDD85B /* XCRemoteSwiftPackageReference "MarkdownView" */;
 			productName = MarkdownView;
 		};
 		38B6DED42FA55DDC001924FB /* MarkdownParser */ = {
