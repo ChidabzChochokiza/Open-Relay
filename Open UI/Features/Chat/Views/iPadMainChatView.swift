@@ -1827,7 +1827,8 @@ struct iPadSidebarContent: View {
                                 return URL(string: "\(baseURL)/api/v1/users/\(userId)/profile/image?v=\(v)")
                             }(),
                             name: dependencies.authViewModel.currentUser?.displayName ?? "User",
-                            authToken: dependencies.apiClient?.network.authToken
+                            authToken: dependencies.apiClient?.network.authToken,
+                            dataURIString: dependencies.authViewModel.currentUser?.profileImageURL
                         )
 
                     }

@@ -56,7 +56,12 @@ final class UpdateChecker {
     // MARK: - Private Constants
 
     private static let appID = "6759630325"
-    private static let lookupURL = URL(string: "https://itunes.apple.com/lookup?id=\(appID)&country=us")!
+
+    /// Query multiple regional CDN nodes in parallel — take the highest version any of them returns.
+    /// This dramatically reduces the chance of hitting a stale CDN node right after a new release.
+    private static let lookupURLs: [URL] = [
+        "us", "gb", "au", "de", "jp", "ca", "fr", "in", "br", "mx"
+    ].compactMap { URL(string: "https://itunes.apple.com/lookup?id=\(appID)&country=\($0)") }
 
     /// UserDefaults key storing the last app-update version the user has already seen/dismissed.
     private static let seenVersionKey = "openui.appUpdate.seenVersion"
@@ -74,7 +79,6 @@ final class UpdateChecker {
             let localVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
 
             guard isNewer(remote: remoteVersion, than: localVersion) else {
-                // Up to date — clear any lingering update state
                 availableUpdate = nil
                 pendingUpdate = nil
                 return
@@ -87,13 +91,12 @@ final class UpdateChecker {
                 releaseURL: releaseURL
             )
             pendingUpdate = info
-            // Only auto-popup if the user hasn't already seen/dismissed this version
             let seenVersion = UserDefaults.standard.string(forKey: Self.seenVersionKey)
             if seenVersion != remoteVersion {
                 availableUpdate = info
             }
         } catch {
-            // Fail silently — update check is non-critical
+            // Fail silently
         }
     }
 
@@ -121,7 +124,9 @@ final class UpdateChecker {
             )
             pendingUpdate = info
             availableUpdate = info
-        } catch { }
+        } catch {
+            // Fail silently
+        }
     }
 
     /// Called when the user taps "Later" — hides the sheet, marks this version
@@ -141,18 +146,46 @@ final class UpdateChecker {
 
     // MARK: - Private Helpers
 
+    /// A dedicated URLSession with no cache at all — ensures we always get a fresh
+    /// response from Apple's servers and never serve a stale on-device URLCache hit.
+    private static let session: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.urlCache = nil
+        config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        return URLSession(configuration: config)
+    }()
+
     private func fetchAppStoreResult() async throws -> ITunesAppResult? {
-        var request = URLRequest(url: Self.lookupURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 10)
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
-        request.setValue("no-cache", forHTTPHeaderField: "Pragma")
+        // Fire all regional requests simultaneously and collect results
+        let results: [ITunesAppResult] = await withTaskGroup(of: ITunesAppResult?.self) { group in
+            for url in Self.lookupURLs {
+                group.addTask {
+                    do {
+                        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 10)
+                        request.setValue("application/json", forHTTPHeaderField: "Accept")
+                        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+                        request.setValue("no-cache", forHTTPHeaderField: "Pragma")
+                        let (data, response) = try await Self.session.data(for: request)
+                        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
+                        let decoded = try JSONDecoder().decode(ITunesLookupResponse.self, from: data)
+                        guard decoded.resultCount > 0, let first = decoded.results.first else { return nil }
+                        return first
+                    } catch {
+                        return nil
+                    }
+                }
+            }
+            var collected: [ITunesAppResult] = []
+            for await result in group {
+                if let r = result { collected.append(r) }
+            }
+            return collected
+        }
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
+        guard !results.isEmpty else { return nil }
 
-        let decoded = try JSONDecoder().decode(ITunesLookupResponse.self, from: data)
-        guard decoded.resultCount > 0 else { return nil }
-        return decoded.results.first
+        // Pick the result with the highest version number
+        return results.max { a, b in isNewer(remote: b.version, than: a.version) }
     }
 
     /// Returns `true` if `remote` is strictly newer than `local`

@@ -64,6 +64,11 @@ final class ActiveChatStore {
     /// Cleared on logout/server switch.
     var cachedMessageQueueSetting: Bool? = nil
 
+    /// Session-level cache for the server's message rating feature flag.
+    /// Populated after the first ChatViewModel fetches backend config.
+    /// Cleared on logout/server switch.
+    var cachedMessageRatingEnabled: Bool? = nil
+
     /// Session-level cache for the user's default params (`ui.system` + `ui.params`).
     /// Populated by the first ChatViewModel that fetches user settings.
     /// Cleared on logout/server switch so the next session always fetches fresh.
@@ -202,6 +207,7 @@ final class ActiveChatStore {
         cachedMessageQueueSetting = nil
         cachedUserDefaultParams = nil
         cachedPinnedModelIds = nil
+        cachedMessageRatingEnabled = nil
         cachedUserName = nil
         cachedUserEmail = nil
     }

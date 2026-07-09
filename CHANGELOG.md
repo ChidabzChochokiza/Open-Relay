@@ -1,5 +1,11 @@
 # Changelog
 
+## v4.15 — July 8, 2026
+
+### What's New
+- Added message rating system - If server has message rating enabled, the user can provide feedback mirroring webui behavior.
+- Added Evaluations panel in Admin Console — admins can browse the feedback history. Leaderboard coming soon.
+
 ## v4.14 — July 7, 2026
 
 ### What's New

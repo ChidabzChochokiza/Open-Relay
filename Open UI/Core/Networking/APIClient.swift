@@ -725,7 +725,7 @@ final class APIClient: @unchecked Sendable {
                     data: data
                 )
             }
-            return self.parseFullConversation(json)
+            return await self.parseFullConversation(json)
         }.value
     }
 
@@ -5384,6 +5384,36 @@ final class APIClient: @unchecked Sendable {
         return []
     }
 
+    // MARK: - Evaluations / Feedback
+
+    /// Paginated list of feedback records.
+    /// GET `/api/v1/evaluations/feedbacks/list?order_by=updated_at&direction=desc&page=N&limit=N`
+    func listFeedbacks(
+        page: Int = 1,
+        limit: Int = 20,
+        orderBy: String = "updated_at",
+        direction: String = "desc"
+    ) async throws -> FeedbackListResponse {
+        let queryItems: [URLQueryItem] = [
+            URLQueryItem(name: "order_by", value: orderBy),
+            URLQueryItem(name: "direction", value: direction),
+            URLQueryItem(name: "page", value: "\(page)"),
+            URLQueryItem(name: "limit", value: "\(limit)")
+        ]
+        let (data, _) = try await network.requestRaw(
+            path: "/api/v1/evaluations/feedbacks/list",
+            queryItems: queryItems
+        )
+        return try JSONDecoder().decode(FeedbackListResponse.self, from: data)
+    }
+
+    /// Fetch a single feedback record with full snapshot.
+    /// GET `/api/v1/evaluations/feedback/{id}`
+    func getFeedback(id: String) async throws -> FeedbackItem {
+        let (data, _) = try await network.requestRaw(path: "/api/v1/evaluations/feedback/\(id)")
+        return try JSONDecoder().decode(FeedbackItem.self, from: data)
+    }
+
     // MARK: - Admin General Settings
 
     /// GET `/api/v1/auths/admin/config` — fetch full auth/general config.
@@ -6001,6 +6031,48 @@ final class APIClient: @unchecked Sendable {
         } catch {
             return nil
         }
+    }
+
+    // MARK: - Evaluations (Feedback)
+
+    /// POST /api/v1/evaluations/feedback — creates a new feedback record.
+    /// Returns the feedback dict including the server-assigned `id`.
+    func createFeedback(type: String, data: [String: Any], meta: [String: Any], snapshot: [String: Any]) async throws -> [String: Any] {
+        let body: [String: Any] = ["type": type, "data": data, "meta": meta, "snapshot": snapshot]
+        let bodyData = try JSONSerialization.data(withJSONObject: body)
+        let (responseData, _) = try await network.requestRaw(
+            path: "/api/v1/evaluations/feedback",
+            method: .post, body: bodyData, contentType: "application/json")
+        return (try? JSONSerialization.jsonObject(with: responseData) as? [String: Any]) ?? [:]
+    }
+
+    /// POST /api/v1/evaluations/feedback/{id} — updates an existing feedback record.
+    func updateFeedback(id: String, type: String, data: [String: Any], meta: [String: Any], snapshot: [String: Any]) async throws {
+        let body: [String: Any] = ["type": type, "data": data, "meta": meta, "snapshot": snapshot]
+        let bodyData = try JSONSerialization.data(withJSONObject: body)
+        _ = try await network.requestRaw(
+            path: "/api/v1/evaluations/feedback/\(id)",
+            method: .post, body: bodyData, contentType: "application/json")
+    }
+
+    /// DELETE `/api/v1/evaluations/feedback/{id}` — permanently removes a feedback record.
+    func deleteFeedback(id: String) async throws {
+        _ = try await network.requestRaw(
+            path: "/api/v1/evaluations/feedback/\(id)",
+            method: .delete)
+    }
+
+    /// POST /api/v1/tasks/tags/completions — AI-generates tag suggestions for a message.
+    /// Returns an array of tag strings.
+    func getTagSuggestions(model: String, messages: [[String: Any]], chatId: String) async throws -> [String] {
+        let body: [String: Any] = ["model": model, "messages": messages, "chat_id": chatId]
+        let bodyData = try JSONSerialization.data(withJSONObject: body)
+        let (responseData, _) = try await network.requestRaw(
+            path: "/api/v1/tasks/tags/completions",
+            method: .post, body: bodyData, contentType: "application/json")
+        if let json = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+           let tags = json["tags"] as? [String] { return tags }
+        return []
     }
 }
 

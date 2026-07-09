@@ -113,6 +113,7 @@ struct BackendConfig: Codable, Sendable {
         let enableCodeExecution: Bool?
         let enableCodeInterpreter: Bool?
         let enableWebsocket: Bool?
+        let enableMessageRating: Bool?
 
         // Backward compat aliases
         var authTrustedHeaderAuth: Bool? { authTrustedHeader }
@@ -138,6 +139,7 @@ struct BackendConfig: Codable, Sendable {
             case enableCodeExecution = "enable_code_execution"
             case enableCodeInterpreter = "enable_code_interpreter"
             case enableWebsocket = "enable_websocket"
+            case enableMessageRating = "enable_message_rating"
         }
 
         init(from decoder: Decoder) throws {
@@ -160,6 +162,7 @@ struct BackendConfig: Codable, Sendable {
             enableCodeExecution = try container.decodeIfPresent(Bool.self, forKey: .enableCodeExecution)
             enableCodeInterpreter = try container.decodeIfPresent(Bool.self, forKey: .enableCodeInterpreter)
             enableWebsocket = try container.decodeIfPresent(Bool.self, forKey: .enableWebsocket)
+            enableMessageRating = try container.decodeIfPresent(Bool.self, forKey: .enableMessageRating)
         }
     }
 
@@ -2798,6 +2801,174 @@ struct OllamaRunningModel: Codable, Identifiable, Sendable {
 
 struct OllamaRunningModelsResponse: Codable, Sendable {
     let models: [OllamaRunningModel]
+}
+
+// MARK: - Feedback (Evaluations)
+
+/// A single user in a feedback record (lightweight version).
+struct FeedbackUser: Codable, Sendable, Identifiable {
+    let id: String
+    let name: String
+    let email: String
+    let role: String
+    let lastActiveAt: Int?
+    let updatedAt: Int?
+    let createdAt: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, email, role
+        case lastActiveAt = "last_active_at"
+        case updatedAt    = "updated_at"
+        case createdAt    = "created_at"
+    }
+}
+
+/// The `data` field of a feedback record.
+struct FeedbackData: Codable, Sendable {
+    let rating: Int?        // 1 = positive, -1 = negative (nil if not rated)
+    let modelId: String?
+    let siblingModelIds: [String]?
+    let reason: String?
+    let comment: String?
+    let tags: [String]?
+    let details: FeedbackDetails?
+
+    enum CodingKeys: String, CodingKey {
+        case rating
+        case modelId        = "model_id"
+        case siblingModelIds = "sibling_model_ids"
+        case reason, comment, tags, details
+    }
+}
+
+struct FeedbackDetails: Codable, Sendable {
+    let rating: Int?
+}
+
+/// The `meta` field of a feedback record.
+struct FeedbackMeta: Codable, Sendable {
+    let modelId: String?
+    let messageId: String?
+    let messageIndex: Int?
+    let chatId: String?
+
+    enum CodingKeys: String, CodingKey {
+        case modelId      = "model_id"
+        case messageId    = "message_id"
+        case messageIndex = "message_index"
+        case chatId       = "chat_id"
+    }
+}
+
+/// A single message inside a feedback snapshot (from snapshot.chat.chat.messages).
+struct FeedbackSnapshotMessage: Codable, Sendable {
+    let id: String
+    let role: String
+    let content: String
+    let parentId: String?
+    let childrenIds: [String]?
+    let timestamp: Int?
+    let model: String?
+    let modelName: String?
+    let annotation: FeedbackSnapshotAnnotation?
+    let feedbackId: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, role, content, timestamp, model, modelName, annotation
+        case parentId    = "parentId"
+        case childrenIds = "childrenIds"
+        case feedbackId  = "feedbackId"
+    }
+}
+
+struct FeedbackSnapshotAnnotation: Codable, Sendable {
+    let rating: Int?
+    let tags: [String]?
+}
+
+/// Inner chat object inside snapshot (snapshot.chat.chat).
+struct FeedbackSnapshotInnerChat: Codable, Sendable {
+    let title: String?
+    let models: [String]?
+    let messages: [FeedbackSnapshotMessage]?
+    let tags: [String]?
+}
+
+/// Outer chat object inside snapshot (snapshot.chat).
+struct FeedbackSnapshotOuterChat: Codable, Sendable {
+    let id: String?
+    let title: String?
+    let chat: FeedbackSnapshotInnerChat?
+    let updatedAt: Int?
+    let createdAt: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, chat
+        case updatedAt = "updated_at"
+        case createdAt = "created_at"
+    }
+}
+
+/// The `snapshot` field of a detailed feedback record.
+struct FeedbackSnapshot: Codable, Sendable {
+    let chat: FeedbackSnapshotOuterChat?
+}
+
+/// A single feedback record returned by the list or detail endpoint.
+struct FeedbackItem: Codable, Sendable, Identifiable {
+    let id: String
+    let userId: String
+    let version: Int?
+    let type: String?
+    let data: FeedbackData?       // nullable per OpenAPI spec (anyOf: [object, null])
+    let meta: FeedbackMeta?       // nullable per OpenAPI spec (anyOf: [object, null])
+    let snapshot: FeedbackSnapshot?
+    let createdAt: Int
+    let updatedAt: Int
+    let user: FeedbackUser?
+
+    enum CodingKeys: String, CodingKey {
+        case id, type, data, meta, snapshot, user, version
+        case userId    = "user_id"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+
+    /// Whether this is a positive (thumbs up) rating.
+    var isPositive: Bool { (data?.rating ?? 0) > 0 }
+
+    /// Formatted relative time string.
+    var relativeTimeString: String {
+        let date = Date(timeIntervalSince1970: TimeInterval(updatedAt))
+        let interval = Date().timeIntervalSince(date)
+        if interval < 60 { return "just now" }
+        if interval < 3600 { return "\(Int(interval / 60))m ago" }
+        if interval < 86400 { return "\(Int(interval / 3600))h ago" }
+        if interval < 86400 * 7 { return "\(Int(interval / 86400))d ago" }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter.string(from: date)
+    }
+
+    /// The rated assistant message from the snapshot.
+    var ratedMessage: FeedbackSnapshotMessage? {
+        guard let messageId = meta?.messageId else { return nil }
+        return snapshot?.chat?.chat?.messages?.first { $0.id == messageId }
+    }
+
+    /// The user message that prompted the rated response.
+    var promptMessage: FeedbackSnapshotMessage? {
+        guard let rated = ratedMessage,
+              let parentId = rated.parentId else { return nil }
+        return snapshot?.chat?.chat?.messages?.first { $0.id == parentId }
+    }
+}
+
+/// Paginated list response from `/api/v1/evaluations/feedbacks/list`.
+struct FeedbackListResponse: Codable, Sendable {
+    let items: [FeedbackItem]
+    let total: Int
 }
 
 /// Returns the MIME type for a given file extension.

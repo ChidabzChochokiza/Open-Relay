@@ -125,6 +125,7 @@ struct ChatDetailView: View {
     @State private var ttsGeneratingMessageId: String?
     @State private var usagePopoverMessageId: String?
     @State private var sourcesSheetMessage: ChatMessage?
+    @State private var feedbackDetailMessage: ChatMessage? = nil
     @State private var randomPrompts: [SuggestedPrompt] = []
 
     // MARK: Model mention (@ trigger)
@@ -426,6 +427,9 @@ struct ChatDetailView: View {
         .applyShareExtensionHandlers(dependencies: dependencies, viewModel: viewModel)
         .sheet(item: $sourcesSheetMessage) { message in
             SourcesDetailSheet(sources: message.sources)
+        }
+        .sheet(item: $feedbackDetailMessage) { msg in
+            FeedbackDetailSheet(message: msg, viewModel: viewModel)
         }
         // Prompt variable input sheet — shown when a selected prompt has {{variables}}
         .sheet(isPresented: Binding<Bool>(
@@ -2753,6 +2757,45 @@ struct ChatDetailView: View {
                 .accessibilityLabel("Token usage")
             }
 
+            // Thumbs up / down (message rating — gated on server feature flag)
+            if viewModel.messageRatingEnabled && !viewModel.isStreaming {
+                let currentRating = message.annotation?.rating
+                Button {
+                    Task {
+                        await viewModel.submitThumbsRating(message: message, rating: 1)
+                        // Open detail sheet with the updated message (feedbackId now set)
+                        if let updated = viewModel.messages.first(where: { $0.id == message.id }) {
+                            feedbackDetailMessage = updated
+                        }
+                    }
+                    Haptics.play(.light)
+                } label: {
+                    compactActionIcon(
+                        icon: currentRating == 1 ? "hand.thumbsup.fill" : "hand.thumbsup",
+                        isActive: currentRating == 1
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Thumbs up")
+
+                Button {
+                    Task {
+                        await viewModel.submitThumbsRating(message: message, rating: -1)
+                        if let updated = viewModel.messages.first(where: { $0.id == message.id }) {
+                            feedbackDetailMessage = updated
+                        }
+                    }
+                    Haptics.play(.light)
+                } label: {
+                    compactActionIcon(
+                        icon: currentRating == -1 ? "hand.thumbsdown.fill" : "hand.thumbsdown",
+                        isActive: currentRating == -1
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Thumbs down")
+            }
+
             // Action buttons (from model's configured actions — e.g. Generate Image)
             if !viewModel.isStreaming {
                 let model = resolveModel(for: message)
@@ -3500,6 +3543,7 @@ struct ChatDetailView: View {
             isContentReady = true
         }
         await viewModel.fetchPinnedModels()
+        await viewModel.fetchMessageRatingEnabled()
         // After fetchPinnedModels(), only rebuild prompts when they are still
         // empty (e.g. backendConfig wasn't ready on the first call) OR when the
         // selected model has per-model suggestion_prompts that differ from what

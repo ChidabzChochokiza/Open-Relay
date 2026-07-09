@@ -31,6 +31,10 @@ struct HistoryNode: Sendable {
     var embeds: [String]
     /// For user messages: the model IDs that were selected when this message was sent.
     var models: [String]
+    /// Feedback annotation for this message (thumbs up/down + detail ratings).
+    var annotation: MessageAnnotation?
+    /// Server-assigned feedback record ID.
+    var feedbackId: String?
 
     init(
         id: String = UUID().uuidString,
@@ -48,7 +52,9 @@ struct HistoryNode: Sendable {
         error: ChatMessageError? = nil,
         usage: [String: Any]? = nil,
         embeds: [String] = [],
-        models: [String] = []
+        models: [String] = [],
+        annotation: MessageAnnotation? = nil,
+        feedbackId: String? = nil
     ) {
         self.id = id
         self.parentId = parentId
@@ -66,6 +72,8 @@ struct HistoryNode: Sendable {
         self.usage = usage
         self.embeds = embeds
         self.models = models
+        self.annotation = annotation
+        self.feedbackId = feedbackId
     }
 
     // MARK: - Serialization
@@ -135,6 +143,14 @@ struct HistoryNode: Sendable {
 
         if let usage, !usage.isEmpty {
             dict["usage"] = usage
+        }
+
+        if let annotation {
+            dict["annotation"] = annotation.toDict()
+        }
+
+        if let feedbackId {
+            dict["feedbackId"] = feedbackId
         }
 
         if !statusHistory.isEmpty {
@@ -256,7 +272,9 @@ struct MessageHistory: Sendable {
                 error: node.error,
                 versions: versions,
                 usage: node.usage,
-                embeds: node.embeds
+                embeds: node.embeds,
+                annotation: node.annotation,
+                feedbackId: node.feedbackId
             )
         }
     }
@@ -666,6 +684,28 @@ struct MessageHistory: Sendable {
             }
         }
 
+        // Parse annotation
+        var annotation: MessageAnnotation?
+        if let rawAnnotation = msg["annotation"] as? [String: Any] {
+            var rating: Int?
+            if let r = rawAnnotation["rating"] as? Int { rating = r }
+            let tags = rawAnnotation["tags"] as? [String] ?? []
+            let reason = rawAnnotation["reason"] as? String
+            let comment = rawAnnotation["comment"] as? String
+            var detailRating: Int?
+            if let details = rawAnnotation["details"] as? [String: Any],
+               let dr = details["rating"] as? Int {
+                detailRating = dr
+            }
+            annotation = MessageAnnotation(
+                rating: rating, tags: tags, reason: reason,
+                comment: comment, detailRating: detailRating
+            )
+        }
+
+        // Parse feedbackId
+        let feedbackId = msg["feedbackId"] as? String
+
         return HistoryNode(
             id: id,
             parentId: parentId,
@@ -682,7 +722,9 @@ struct MessageHistory: Sendable {
             error: error,
             usage: usage,
             embeds: embeds,
-            models: models
+            models: models,
+            annotation: annotation,
+            feedbackId: feedbackId
         )
     }
 }

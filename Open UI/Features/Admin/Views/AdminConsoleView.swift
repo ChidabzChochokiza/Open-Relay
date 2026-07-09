@@ -19,15 +19,17 @@ enum UsersSubTab: String, CaseIterable {
 enum AdminConsoleTab: String, CaseIterable {
     case users       = "Users"
     case analytics   = "Analytics"
+    case evaluations = "Evaluations"
     case functions   = "Functions"
     case settings    = "Settings"
 
     var icon: String {
         switch self {
-        case .users:     return "person.2"
-        case .analytics: return "chart.bar.xaxis"
-        case .functions: return "function"
-        case .settings:  return "gear"
+        case .users:       return "person.2"
+        case .analytics:   return "chart.bar.xaxis"
+        case .evaluations: return "hand.thumbsup"
+        case .functions:   return "function"
+        case .settings:    return "gear"
         }
     }
 }
@@ -101,6 +103,8 @@ struct AdminConsoleView: View {
                     AdminUsersTab()
                 case .analytics:
                     AdminAnalyticsView()
+                case .evaluations:
+                    AdminFeedbackView()
                 case .functions:
                     AdminFunctionsView()
                 case .settings:

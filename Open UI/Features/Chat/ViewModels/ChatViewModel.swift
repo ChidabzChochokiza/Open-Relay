@@ -152,6 +152,10 @@ final class ChatViewModel {
     /// Persisted to server user settings (`ui.enableMessageQueue`).
     var enableMessageQueue: Bool = false
 
+    /// Whether message rating (thumbs up/down) is enabled on this server.
+    /// Populated from BackendFeatures.enableMessageRating via ActiveChatStore.
+    var messageRatingEnabled: Bool = false
+
     /// Messages queued to send after the current stream completes.
     var messageQueue: [QueuedMessage] = []
     /// Pinned model IDs synced with server `ui.pinnedModels`.
@@ -6194,6 +6198,197 @@ final class ChatViewModel {
         // the final message commit propagates back through the view hierarchy.
         if streamingStore.streamingMessageId == id {
             streamingStore.appendSources(sources)
+        }
+    }
+
+    // MARK: - Message Feedback / Rating
+
+    /// Fetches the message rating feature flag from the backend config.
+    /// Uses session-level cache so we only call /api/config once per session.
+    func fetchMessageRatingEnabled() async {
+        if let cached = activeChatStore?.cachedMessageRatingEnabled {
+            messageRatingEnabled = cached
+            return
+        }
+        guard let apiClient = manager?.apiClient else { return }
+        do {
+            let config = try await apiClient.getBackendConfig()
+            let enabled = config.features?.enableMessageRating ?? false
+            messageRatingEnabled = enabled
+            activeChatStore?.cachedMessageRatingEnabled = enabled
+        } catch {
+            logger.debug("Failed to fetch message rating setting: \(error.localizedDescription)")
+        }
+    }
+
+    /// Builds a full messages array matching the web UI feedback snapshot format.
+    private func buildSnapshotMessages(from conv: Conversation) -> [[String: Any]] {
+        conv.messages.map { m -> [String: Any] in
+            let childrenIds = conv.history.nodes[m.id]?.childrenIds ?? []
+            var msg: [String: Any] = [
+                "id": m.id,
+                "parentId": m.parentId as Any? ?? NSNull(),
+                "childrenIds": childrenIds,
+                "role": m.role.rawValue,
+                "content": m.content,
+                "timestamp": Int(m.timestamp.timeIntervalSince1970),
+                "done": !m.isStreaming
+            ]
+            if let model = m.model { msg["model"] = model }
+            if let model = m.model { msg["modelName"] = model }
+            msg["modelIdx"] = 0
+            if let annotation = m.annotation {
+                var ann: [String: Any] = ["rating": annotation.rating]
+                if !annotation.tags.isEmpty { ann["tags"] = annotation.tags }
+                if let reason = annotation.reason { ann["reason"] = reason }
+                if let comment = annotation.comment { ann["comment"] = comment }
+                if let detail = annotation.detailRating { ann["details"] = ["rating": detail] }
+                msg["annotation"] = ann
+            } else {
+                msg["annotation"] = NSNull()
+            }
+            if let feedbackId = m.feedbackId { msg["feedbackId"] = feedbackId }
+            return msg
+        }
+    }
+
+    /// Builds the snapshot dict matching the web UI double-nested format.
+    private func buildSnapshot(chatId: String, conv: Conversation, modelId: String) -> [String: Any] {
+        let historyDict = conv.history.toServerDict()
+        let messages = buildSnapshotMessages(from: conv)
+        let innerChat: [String: Any] = [
+            "title": conv.title,
+            "models": [modelId],
+            "id": "",
+            "params": conv.chatParams?.toRequestParams() ?? [:] as [String: Any],
+            "history": historyDict,
+            "messages": messages,
+            "tags": conv.tags,
+            "timestamp": Int(conv.createdAt.timeIntervalSince1970 * 1000),
+            "files": [] as [Any]
+        ]
+        var outerChat: [String: Any] = [
+            "id": chatId,
+            "title": conv.title,
+            "chat": innerChat,
+            "updated_at": Int(conv.updatedAt.timeIntervalSince1970),
+            "created_at": Int(conv.createdAt.timeIntervalSince1970),
+            "share_id": conv.shareId as Any? ?? NSNull(),
+            "archived": conv.archived,
+            "pinned": conv.pinned,
+            "meta": ["tags": conv.tags] as [String: Any],
+            "tasks": NSNull(),
+            "summary": NSNull()
+        ]
+        if let folderId = conv.folderId { outerChat["folder_id"] = folderId } else { outerChat["folder_id"] = NSNull() }
+        return ["chat": outerChat]
+    }
+
+    /// Called when user taps 👍 or 👎 on an assistant message.
+    /// Creates a feedback record on the server and writes the initial annotation to the local tree.
+    func submitThumbsRating(message: ChatMessage, rating: Int) async {
+        guard let chatId = conversationId ?? conversation?.id,
+              let apiClient = manager?.apiClient,
+              let conv = conversation else { return }
+
+        let modelId = message.model ?? selectedModelId ?? ""
+        let messageIndex = conv.messages.firstIndex(where: { $0.id == message.id }) ?? 0
+        let snapshot = buildSnapshot(chatId: chatId, conv: conv, modelId: modelId)
+        let meta: [String: Any] = [
+            "model_id": modelId,
+            "message_id": message.id,
+            "message_index": messageIndex,
+            "chat_id": chatId,
+            "base_models": [modelId: NSNull()]
+        ]
+        let data: [String: Any] = [
+            "rating": rating,
+            "model_id": modelId,
+            "tags": [String]()
+        ]
+
+        do {
+            let result = try await apiClient.createFeedback(
+                type: "rating", data: data, meta: meta, snapshot: snapshot)
+            let feedbackId = result["id"] as? String
+            let annotation = MessageAnnotation(rating: rating, tags: [])
+            // Update tree node
+            conversation?.history.updateNode(id: message.id) { node in
+                node.annotation = annotation
+                node.feedbackId = feedbackId
+            }
+            // Update flat messages list so UI reflects rating immediately
+            if let idx = conversation?.messages.firstIndex(where: { $0.id == message.id }) {
+                conversation?.messages[idx].annotation = annotation
+                conversation?.messages[idx].feedbackId = feedbackId
+            }
+            await syncToServerViaTree()
+            logger.info("Feedback created: \(feedbackId ?? "nil") rating=\(rating)")
+        } catch {
+            logger.error("Failed to create feedback: \(error.localizedDescription)")
+        }
+    }
+
+    /// Called when user saves the feedback detail sheet.
+    func saveFeedbackDetails(message: ChatMessage, detailRating: Int, reason: String?, comment: String?, tags: [String]) async {
+        guard let chatId = conversationId ?? conversation?.id,
+              let apiClient = manager?.apiClient,
+              let conv = conversation,
+              let feedbackId = message.feedbackId else { return }
+
+        let modelId = message.model ?? selectedModelId ?? ""
+        let currentRating = message.annotation?.rating ?? 1
+        let messageIndex = conv.messages.firstIndex(where: { $0.id == message.id }) ?? 0
+        let snapshot = buildSnapshot(chatId: chatId, conv: conv, modelId: modelId)
+        let meta: [String: Any] = [
+            "model_id": modelId,
+            "message_id": message.id,
+            "message_index": messageIndex,
+            "chat_id": chatId,
+            "base_models": [modelId: NSNull()]
+        ]
+        var dataDict: [String: Any] = [
+            "rating": currentRating,
+            "model_id": modelId,
+            "tags": tags
+        ]
+        if let reason { dataDict["reason"] = reason }
+        if let c = comment, !c.isEmpty { dataDict["comment"] = c }
+        dataDict["details"] = ["rating": detailRating]
+
+        do {
+            try await apiClient.updateFeedback(
+                id: feedbackId, type: "rating", data: dataDict, meta: meta, snapshot: snapshot)
+            let newAnnotation = MessageAnnotation(
+                rating: currentRating, tags: tags, reason: reason,
+                comment: (comment?.isEmpty == false) ? comment : nil, detailRating: detailRating)
+            conversation?.history.updateNode(id: message.id) { node in
+                node.annotation = newAnnotation
+            }
+            if let idx = conversation?.messages.firstIndex(where: { $0.id == message.id }) {
+                conversation?.messages[idx].annotation = newAnnotation
+            }
+            await syncToServerViaTree()
+            logger.info("Feedback details saved for \(feedbackId)")
+        } catch {
+            logger.error("Failed to save feedback details: \(error.localizedDescription)")
+        }
+    }
+
+    /// Fetches AI-generated tag suggestions for a message.
+    func loadTagSuggestions(for message: ChatMessage) async -> [String] {
+        guard let chatId = conversationId ?? conversation?.id,
+              let apiClient = manager?.apiClient,
+              let conv = conversation else { return [] }
+        let modelId = message.model ?? selectedModelId ?? ""
+        let msgs: [[String: Any]] = conv.messages.prefix(while: { $0.id != message.id }).map { m in
+            ["role": m.role.rawValue, "content": m.content]
+        } + [["role": message.role.rawValue, "content": message.content]]
+        do {
+            return try await apiClient.getTagSuggestions(model: modelId, messages: msgs, chatId: chatId)
+        } catch {
+            logger.debug("Tag suggestions failed: \(error.localizedDescription)")
+            return []
         }
     }
 
