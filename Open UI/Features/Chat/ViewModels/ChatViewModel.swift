@@ -307,6 +307,11 @@ final class ChatViewModel {
     /// when the user navigates away or sends a new message.
     private var recoveryDelayTask: Task<Void, Never>?
     private var emptyPollCount = 0
+    /// The server content length observed on the previous recovery poll.
+    /// When the server content grows between polls the model is still generating,
+    /// so `emptyPollCount` is reset to 0 — preventing premature give-up for slow
+    /// models (large reasoning models, long MCP tool chains, local models, etc.).
+    private var lastRecoveryPollContentLength: Int = 0
     /// Tracks whether the socket has received at least one content token.
     /// Used by the recovery timer to avoid overwriting an active stream.
     private var socketHasReceivedContent = false
@@ -4340,6 +4345,7 @@ final class ChatViewModel {
         recoveryDelayTask?.cancel()
         recoveryDelayTask = nil
         emptyPollCount = 0
+        lastRecoveryPollContentLength = 0
         // NOTE: endBackgroundTask() is intentionally called INSIDE the
         // completionTask below, AFTER the notification has been awaited.
         // Calling it here (before the Task) causes iOS to immediately suspend
@@ -4517,6 +4523,7 @@ final class ChatViewModel {
         recoveryTimer?.invalidate()
         recoveryDelayTask?.cancel()
         emptyPollCount = 0
+        lastRecoveryPollContentLength = 0
 
         // Use a cancellable Task for the initial delay instead of
         // DispatchQueue.main.asyncAfter, which cannot be cancelled when
@@ -4537,6 +4544,25 @@ final class ChatViewModel {
     }
 
     /// Extracted recovery poll logic (called by the recovery timer).
+    ///
+    /// ## Completion detection
+    /// We intentionally do NOT rely on `lastAssistant.isStreaming` (the server's `done` flag)
+    /// as the sole signal because that flag is only set when the app calls `chatCompleted` —
+    /// which only happens AFTER the app receives `done:true` from the socket.  On a slow
+    /// connection the `done:true` socket event can be delayed or dropped, creating a circular
+    /// dependency where neither side ever marks the response as finished.
+    ///
+    /// Instead we use **content-based completion detection**: the server always persists the
+    /// full response content once generation finishes, regardless of whether `chatCompleted`
+    /// was sent.  A response is considered complete when:
+    ///   1. The server explicitly sets `done = true` (`!lastAssistant.isStreaming`), OR
+    ///   2. The content is non-empty AND all tool-call `<details>` blocks are closed
+    ///      (i.e. generation finished but `chatCompleted` was never sent due to dropped event).
+    ///
+    /// For the give-up threshold we no longer reset `emptyPollCount` based on tool statuses —
+    /// that reset was the mechanism that caused the timer to loop indefinitely when a
+    /// `done:true` socket event was dropped.  Instead we let `emptyPollCount` increment
+    /// freely and trust the content-stability check above to finalize first.
     private func runRecoveryPoll(assistantMessageId: String, chatId: String?) {
         Task { @MainActor in
             guard self.isStreaming, !self.hasFinishedStreaming else {
@@ -4546,6 +4572,11 @@ final class ChatViewModel {
             }
             guard let chatId, let manager = self.manager else { return }
 
+            // polledContentLength captures the server content length from the fetch below.
+            // It is set inside the do-block and reused for the content-growth check after,
+            // avoiding a second redundant fetchConversation call.
+            var polledContentLength = self.lastRecoveryPollContentLength
+
             do {
                 let refreshed = try await manager.fetchConversation(id: chatId)
                 if let lastAssistant = refreshed.messages.last(where: { $0.role == .assistant }) {
@@ -4553,19 +4584,31 @@ final class ChatViewModel {
                     let localContent = self.conversation?.messages.last(where: { $0.role == .assistant })?.content
                         .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
-                    // Server has more content than local — but ONLY update
-                    // if the socket has NOT been delivering tokens. If the
-                    // socket is actively streaming, let it continue token-by-token
-                    // rather than dumping the entire server content at once.
+                    // Capture the raw (non-trimmed) character count for the growth check below.
+                    polledContentLength = lastAssistant.content.count
+
+                    // Server has more content than local — but ONLY update if the socket
+                    // has NOT been delivering tokens. If the socket is actively streaming,
+                    // let it continue token-by-token rather than dumping the entire server
+                    // content at once.
                     if !serverContent.isEmpty && serverContent.count > localContent.count && !self.socketHasReceivedContent {
                         self.logger.info("Recovery: adopting server content (socket silent)")
                         self.updateAssistantMessage(
                             id: assistantMessageId, content: lastAssistant.content, isStreaming: true)
                     }
 
-                    // Server says streaming is done
-                    if !lastAssistant.isStreaming && !serverContent.isEmpty {
-                        self.logger.info("Recovery: server says done with \(serverContent.count) chars")
+                    // Determine if the response is complete.
+                    //
+                    // Primary signal: server's done flag (set when chatCompleted is processed).
+                    // Fallback signal: content-based detection — the response is structurally
+                    // complete when all tool-call blocks are closed, regardless of the done flag.
+                    // This catches the slow-connection case where the done:true socket event
+                    // was delayed or dropped and chatCompleted was never sent.
+                    let serverDone = !lastAssistant.isStreaming
+                    let contentComplete = !serverContent.isEmpty && Self.toolCallResponseIsComplete(serverContent)
+
+                    if (serverDone || contentComplete) && !serverContent.isEmpty {
+                        self.logger.info("Recovery: finalizing — serverDone=\(serverDone) contentComplete=\(contentComplete) chars=\(serverContent.count)")
                         self.updateAssistantMessage(
                             id: assistantMessageId, content: lastAssistant.content, isStreaming: false)
                         let doneContent = lastAssistant.content
@@ -4578,30 +4621,29 @@ final class ChatViewModel {
                 self.logger.warning("Recovery poll failed: \(error.localizedDescription)")
             }
 
-            // Check if there are active (pending) tool statuses — if so, tools
-            // are still executing on the server. Do NOT count these polls toward
-            // the give-up threshold. The server will eventually finish or error;
-            // the user can also cancel manually via the stop button.
-            let hasActiveToolStatus: Bool = {
-                guard let msgIdx = self.conversation?.messages.firstIndex(where: { $0.id == assistantMessageId }) else { return false }
-                let statuses = self.conversation?.messages[msgIdx].statusHistory ?? []
-                return statuses.contains { $0.done != true && $0.hidden != true }
-            }()
+            // Track whether the server content grew since the last poll.
+            // If the model is still actively generating (content grew), reset
+            // emptyPollCount so we never give up on a slow-but-progressing model
+            // (large reasoning models, long MCP tool chains, local models, etc.).
+            // Only increment when content has been completely static — meaning the
+            // model has genuinely stopped producing output.
+            let currentServerContentLength = polledContentLength
 
-            if hasActiveToolStatus {
-                // Tools still running — reset the empty poll counter so we
-                // never give up while the server is actively processing.
+            if currentServerContentLength > self.lastRecoveryPollContentLength {
+                // Model is still generating — stay patient, reset the give-up counter
+                self.logger.debug("Recovery: content growing (\(self.lastRecoveryPollContentLength) → \(currentServerContentLength) chars) — resetting give-up counter")
+                self.lastRecoveryPollContentLength = currentServerContentLength
                 self.emptyPollCount = 0
-                self.logger.debug("Recovery: tools still active, resetting poll count")
             } else {
+                // Content unchanged this poll — increment the stale counter
                 self.emptyPollCount += 1
+                self.logger.debug("Recovery: content static at \(currentServerContentLength) chars (stale poll \(self.emptyPollCount)/12)")
             }
 
-            // After 60s (12 polls at 5s) with NO active tools, give up.
-            // When tools ARE active, emptyPollCount stays at 0 so we wait
-            // indefinitely until the server finishes or the user cancels.
+            // After 60s (12 consecutive static polls at 5s) with no finalization signal
+            // AND no new content from the server, give up gracefully.
             if self.emptyPollCount >= 12 {
-                self.logger.warning("Recovery: giving up after \(self.emptyPollCount) polls (no active tools)")
+                self.logger.warning("Recovery: giving up after \(self.emptyPollCount) static polls (content stalled at \(currentServerContentLength) chars)")
                 let giveUpContent = self.conversation?.messages.last(where: { $0.role == .assistant })?.content ?? ""
                 self.updateAssistantMessage(
                     id: assistantMessageId,
@@ -4611,6 +4653,35 @@ final class ChatViewModel {
                 self.cleanupStreaming()
             }
         }
+    }
+
+    /// Returns `true` when the content string represents a structurally complete tool-call
+    /// response — i.e. every `<details type="tool_calls">` opening tag has a matching
+    /// `</details>` closing tag.
+    ///
+    /// This is used by the recovery timer to detect response completion without relying on
+    /// the server's `done` flag, which may never be set if the `done:true` socket event was
+    /// dropped and `chatCompleted` was never sent.
+    ///
+    /// - Returns: `true` if there are no unclosed tool-call blocks (including when there are
+    ///   no tool-call blocks at all, which means the response is a plain-text completion).
+    private static func toolCallResponseIsComplete(_ content: String) -> Bool {
+        // Fast path: no tool calls in the content → nothing to check, response is complete.
+        guard content.contains("tool_calls") else { return true }
+
+        // We need at least one opening AND one closing details tag to have a complete block.
+        guard content.contains("<details"), content.contains("</details>") else { return false }
+
+        // Find the last opening <details type="tool_calls"> tag and the last </details> tag.
+        // If </details> comes AFTER the last opening tag, all blocks are closed.
+        // This is an O(n) scan but only runs every 5s in the recovery path.
+        guard let lastOpenRange = content.range(of: "<details", options: [.caseInsensitive, .backwards]),
+              let lastCloseRange = content.range(of: "</details>", options: [.caseInsensitive, .backwards]) else {
+            return false
+        }
+
+        // The last close tag must come after the last open tag for the block to be closed.
+        return lastCloseRange.lowerBound > lastOpenRange.lowerBound
     }
 
     // MARK: - Cleanup
@@ -4727,6 +4798,7 @@ final class ChatViewModel {
         recoveryTimer?.invalidate()
         recoveryTimer = nil
         emptyPollCount = 0
+        lastRecoveryPollContentLength = 0
         // or remove them if they never produced meaningful output
         if let lastIdx = conversation?.messages.lastIndex(where: { $0.role == .assistant }) {
             let statuses = conversation?.messages[lastIdx].statusHistory ?? []

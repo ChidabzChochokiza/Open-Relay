@@ -57,11 +57,8 @@ final class UpdateChecker {
 
     private static let appID = "6759630325"
 
-    /// Query multiple regional CDN nodes in parallel — take the highest version any of them returns.
-    /// This dramatically reduces the chance of hitting a stale CDN node right after a new release.
-    private static let lookupURLs: [URL] = [
-        "us", "gb", "au", "de", "jp", "ca", "fr", "in", "br", "mx"
-    ].compactMap { URL(string: "https://itunes.apple.com/lookup?id=\(appID)&country=\($0)") }
+    /// Regional country codes to query in parallel — take the highest version any of them returns.
+    private static let lookupCountries = ["us", "gb", "au", "de", "jp", "ca", "fr", "in", "br", "mx"]
 
     /// UserDefaults key storing the last app-update version the user has already seen/dismissed.
     private static let seenVersionKey = "openui.appUpdate.seenVersion"
@@ -156,9 +153,18 @@ final class UpdateChecker {
     }()
 
     private func fetchAppStoreResult() async throws -> ITunesAppResult? {
+        // Add a timestamp cache-buster — Apple's CDN ignores Cache-Control headers and
+        // serves stale responses, but a unique query param forces a fresh server hit.
+        let timestamp = Int(Date().timeIntervalSince1970)
+
+        // Build URLs with timestamp cache-buster for each region
+        let urls: [URL] = Self.lookupCountries.compactMap {
+            URL(string: "https://itunes.apple.com/lookup?id=\(Self.appID)&country=\($0)&_=\(timestamp)")
+        }
+
         // Fire all regional requests simultaneously and collect results
         let results: [ITunesAppResult] = await withTaskGroup(of: ITunesAppResult?.self) { group in
-            for url in Self.lookupURLs {
+            for url in urls {
                 group.addTask {
                     do {
                         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 10)

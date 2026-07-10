@@ -1,5 +1,10 @@
 # Changelog
 
+## v4.15.1 — July 9, 2026
+
+### Bug Fixes
+- Improved streaming resilience for slow models — responses from large reasoning models, long MCP tool chains, and local models should no longer time out prematurely.
+
 ## v4.15 — July 8, 2026
 
 ### What's New
