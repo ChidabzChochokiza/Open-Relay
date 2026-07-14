@@ -1,6 +1,7 @@
 {
   "project": "open-relay",
   "platform": "ios",
+  "scheme": "Open UI",
   "github": {
     "owner": "ChidabzChochokiza",
     "repo": "Open-Relay"
