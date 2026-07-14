@@ -201,11 +201,11 @@ jobs:
           elif [ "$PROJECT_TYPE" = "reactnative" ] || [ "$PROJECT_TYPE" = "expo" ]; then
             # Use xcodebuild directly for React Native/Expo
             echo "Building React Native iOS ($CONFIGURATION)..."
-            BUILD_CMD="xcodebuild"
+            BUILD_CMD=(xcodebuild)
             if [ -n "$WORKSPACE" ]; then
-              BUILD_CMD="$BUILD_CMD -workspace $WORKSPACE"
+              BUILD_CMD+=(-workspace "$WORKSPACE")
             elif [ -n "$PROJECT" ]; then
-              BUILD_CMD="$BUILD_CMD -project $PROJECT"
+              BUILD_CMD+=(-project "$PROJECT")
             fi
 
             # Auto-detect scheme from workspace name (e.g., MyApp.xcworkspace -> MyApp)
@@ -215,49 +215,53 @@ jobs:
               SCHEME=$(basename "$PROJECT" .xcodeproj)
             fi
 
-            BUILD_CMD="$BUILD_CMD -scheme $SCHEME"
-            BUILD_CMD="$BUILD_CMD -configuration $CONFIGURATION"
-            BUILD_CMD="$BUILD_CMD -destination 'generic/platform=iOS'"
-            BUILD_CMD="$BUILD_CMD -derivedDataPath $DERIVED_DATA_PATH"
-            BUILD_CMD="$BUILD_CMD CODE_SIGNING_ALLOWED=NO"
-            BUILD_CMD="$BUILD_CMD COMPILER_INDEX_STORE_ENABLE=NO"
-            BUILD_CMD="$BUILD_CMD -quiet build"
+            BUILD_CMD+=(-scheme "$SCHEME")
+            BUILD_CMD+=(-configuration "$CONFIGURATION")
+            BUILD_CMD+=(-destination "generic/platform=iOS")
+            BUILD_CMD+=(-derivedDataPath "$DERIVED_DATA_PATH")
+            BUILD_CMD+=(CODE_SIGNING_ALLOWED=NO)
+            BUILD_CMD+=(COMPILER_INDEX_STORE_ENABLE=NO)
+            BUILD_CMD+=(-quiet build)
 
-            echo "Running: $BUILD_CMD"
-            eval $BUILD_CMD
+            printf 'Running:'
+            printf ' %q' "${BUILD_CMD[@]}"
+            printf '\n'
+            "${BUILD_CMD[@]}"
           else
-            BUILD_CMD="xcodebuild"
+            BUILD_CMD=(xcodebuild)
             if [ -n "$WORKSPACE" ]; then
-              BUILD_CMD="$BUILD_CMD -workspace $WORKSPACE"
+              BUILD_CMD+=(-workspace "$WORKSPACE")
             elif [ -n "$PROJECT" ]; then
-              BUILD_CMD="$BUILD_CMD -project $PROJECT"
+              BUILD_CMD+=(-project "$PROJECT")
             fi
 
-            BUILD_CMD="$BUILD_CMD -scheme $SCHEME"
-            BUILD_CMD="$BUILD_CMD -configuration $CONFIGURATION"
-            BUILD_CMD="$BUILD_CMD -destination 'generic/platform=iOS'"
-            BUILD_CMD="$BUILD_CMD -derivedDataPath $DERIVED_DATA_PATH"
+            BUILD_CMD+=(-scheme "$SCHEME")
+            BUILD_CMD+=(-configuration "$CONFIGURATION")
+            BUILD_CMD+=(-destination "generic/platform=iOS")
+            BUILD_CMD+=(-derivedDataPath "$DERIVED_DATA_PATH")
 
             # Speed optimization flags
-            BUILD_CMD="$BUILD_CMD COMPILER_INDEX_STORE_ENABLE=NO"
-            BUILD_CMD="$BUILD_CMD DEBUG_INFORMATION_FORMAT=dwarf"
-            BUILD_CMD="$BUILD_CMD ONLY_ACTIVE_ARCH=YES"
-            BUILD_CMD="$BUILD_CMD -quiet"
+            BUILD_CMD+=(COMPILER_INDEX_STORE_ENABLE=NO)
+            BUILD_CMD+=(DEBUG_INFORMATION_FORMAT=dwarf)
+            BUILD_CMD+=(ONLY_ACTIVE_ARCH=YES)
+            BUILD_CMD+=(-quiet)
 
             # Xcode 16+ native compilation caching
-            BUILD_CMD="$BUILD_CMD SWIFT_ENABLE_COMPILE_CACHE=YES"
-            BUILD_CMD="$BUILD_CMD CLANG_ENABLE_COMPILE_CACHE=YES"
+            BUILD_CMD+=(SWIFT_ENABLE_COMPILE_CACHE=YES)
+            BUILD_CMD+=(CLANG_ENABLE_COMPILE_CACHE=YES)
 
             if [ "$USE_SIGNING" = "true" ]; then
               # For signed builds, use archive
-              BUILD_CMD="$BUILD_CMD -archivePath ../build/App.xcarchive archive"
+              BUILD_CMD+=(-archivePath ../build/App.xcarchive archive)
             else
               # For unsigned builds, use faster 'build' action
-              BUILD_CMD="$BUILD_CMD CODE_SIGNING_ALLOWED=NO build"
+              BUILD_CMD+=(CODE_SIGNING_ALLOWED=NO build)
             fi
 
-            echo "Running: $BUILD_CMD"
-            eval $BUILD_CMD
+            printf 'Running:'
+            printf ' %q' "${BUILD_CMD[@]}"
+            printf '\n'
+            "${BUILD_CMD[@]}"
           fi
 
           # Create IPA
