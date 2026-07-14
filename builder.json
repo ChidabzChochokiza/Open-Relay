@@ -1,0 +1,14 @@
+{
+  "project": "Open-Relay",
+  "platform": "ios",
+  "github": {
+    "owner": "ichigo3766",
+    "repo": "Open-Relay"
+  },
+  "ios": {},
+  "flutter": {
+    "watch": {}
+  },
+  "reactNative": {},
+  "mobai": {}
+}
